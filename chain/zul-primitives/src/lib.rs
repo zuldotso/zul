@@ -1,13 +1,17 @@
 //! Core ZUL types shared across the node: hashing, constants, transaction
-//! metadata, and (soon) blocks, genesis, and config.
+//! metadata, the binary merkle helper, and blocks. Genesis and config land
+//! next.
 //!
 //! This crate deliberately contains no storage or execution logic so that
 //! every other crate can depend on it without dependency cycles.
 
+pub mod block;
 pub mod constants;
 pub mod hash;
+pub mod merkle;
 pub mod meta;
 
+pub use block::{Block, BlockHeader};
 pub use hash::{blake3_32, H256};
 pub use meta::ExecutedTransactionMeta;
 
