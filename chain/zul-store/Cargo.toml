@@ -1,0 +1,20 @@
+[package]
+name = "zul-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zul-primitives = { workspace = true }
+solana-sdk = { workspace = true }
+solana-system-interface = { workspace = true }
+redb = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+hex = { workspace = true }
