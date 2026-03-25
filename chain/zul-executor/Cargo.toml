@@ -1,0 +1,42 @@
+[package]
+name = "zul-executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zul-primitives = { workspace = true }
+zul-store = { workspace = true }
+solana-sdk = { workspace = true }
+solana-svm = { workspace = true }
+solana-svm-callback = { workspace = true }
+solana-svm-feature-set = { workspace = true }
+solana-svm-transaction = { workspace = true }
+solana-program-runtime = { workspace = true }
+solana-bpf-loader-program = { workspace = true }
+solana-loader-v4-program = { workspace = true }
+solana-system-program = { workspace = true }
+solana-compute-budget-program = { workspace = true }
+solana-compute-budget = { workspace = true }
+solana-compute-budget-instruction = { workspace = true }
+solana-fee-structure = { workspace = true }
+solana-sdk-ids = { workspace = true }
+solana-clock = { workspace = true }
+solana-rent = { workspace = true }
+solana-epoch-schedule = { workspace = true }
+solana-sysvar = { workspace = true }
+solana-sysvar-id = { workspace = true }
+solana-message = { workspace = true }
+solana-transaction-error = { workspace = true }
+agave-syscalls = { workspace = true }
+agave-feature-set = { workspace = true }
+solana-program-binaries = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+solana-system-interface = { workspace = true }
+spl-generic-token = "2"
+tempfile = "3"

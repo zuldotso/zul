@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "zul-primitives",
     "zul-store",
+    "zul-executor",
 ]
 
 [workspace.package]
@@ -13,10 +14,37 @@ license = "Apache-2.0"
 [workspace.dependencies]
 zul-primitives = { path = "zul-primitives" }
 zul-store = { path = "zul-store" }
+zul-executor = { path = "zul-executor" }
 
 # Solana / Agave (3.x line, matches local solana-cli 3.1.14)
 solana-sdk = "3"
+solana-svm = "3.1"
 solana-system-interface = { version = "2", features = ["bincode"] }
+solana-svm-callback = "3"
+solana-svm-feature-set = "3"
+solana-svm-transaction = "3"
+solana-program-runtime = "3"
+solana-bpf-loader-program = "3"
+solana-loader-v4-program = "3"
+solana-system-program = "3"
+solana-compute-budget-program = "3"
+solana-compute-budget = "3"
+solana-compute-budget-instruction = "3"
+solana-fee-structure = "3"
+solana-sdk-ids = "3"
+solana-clock = "3"
+solana-rent = "3"
+solana-epoch-schedule = "3"
+solana-sysvar = "3"
+solana-sysvar-id = "3"
+solana-message = "3"
+solana-transaction-error = "3"
+agave-syscalls = "3"
+agave-feature-set = "3"
+solana-program-binaries = { version = "3", features = ["agave-unstable-api"] }
+solana-transaction-context = "3"
+solana-instructions-sysvar = "3"
+solana-instruction = "3"
 
 # Utilities
 anyhow = "1"
@@ -32,3 +60,7 @@ toml = "0.8"
 
 [profile.release]
 lto = "thin"
+
+# Local dev builds of the SVM dependency tree are slow; keep moderate opt for deps.
+[profile.dev.package."*"]
+opt-level = 1
