@@ -4,6 +4,7 @@ members = [
     "zul-primitives",
     "zul-store",
     "zul-executor",
+    "zul-rpc",
 ]
 
 [workspace.package]
@@ -15,6 +16,7 @@ license = "Apache-2.0"
 zul-primitives = { path = "zul-primitives" }
 zul-store = { path = "zul-store" }
 zul-executor = { path = "zul-executor" }
+zul-rpc = { path = "zul-rpc" }
 
 # Solana / Agave (3.x line, matches local solana-cli 3.1.14)
 solana-sdk = "3"
@@ -57,6 +59,11 @@ hex = "0.4"
 bs58 = "0.5"
 redb = "2"
 toml = "0.8"
+tokio = { version = "1", features = ["full"] }
+jsonrpsee = { version = "0.26", features = ["server", "macros"] }
+base64 = "0.22"
+async-trait = "0.1"
+futures = "0.3"
 
 [profile.release]
 lto = "thin"
