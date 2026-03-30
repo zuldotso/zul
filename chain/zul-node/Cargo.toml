@@ -1,0 +1,30 @@
+[package]
+name = "zul-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zul-node"
+path = "src/main.rs"
+
+[dependencies]
+zul-primitives = { workspace = true }
+zul-store = { workspace = true }
+zul-executor = { workspace = true }
+zul-rpc = { workspace = true }
+solana-sdk = { workspace = true }
+solana-system-interface = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+bs58 = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tiny_http = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
