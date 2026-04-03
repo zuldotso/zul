@@ -1,0 +1,28 @@
+# Zul genesis specification (example / local development).
+# The blake3 hash of the canonical encoding of this content is the chain's
+# genesis hash and serves as the chain identifier.
+#
+# The pubkeys below are throwaway examples. For a runnable local chain,
+# generate your own keys (scripts/init-local) so you hold the matching
+# private keys for the sequencer and faucet accounts.
+
+chain_name = "zul-local"
+# Unix time in milliseconds the chain was created.
+creation_time_ms = 1760000000000
+# Native token: ZUL, 9 decimals (1 ZUL = 1_000_000_000 lamports).
+
+# Sequencer authority (block production + L2 system operations).
+sequencer = "E1qwDui9Muq3gfyGwdk1qZXnNyy2WzgHkESJGr4KwJpm"
+# All transaction fees accumulate here.
+fee_collector = "6PaVUAPQqyFWxYaLbnVaiwcAkDqiqjCvMMmFoGmNdCFM"
+
+# Initial ZUL allocations (lamports).
+[[allocations]]
+# Faucet pool — backs requestAirdrop on local/dev deployments.
+pubkey = "Hvd9JUwyRzdm7m7yRcSQBphQtpPNWf5GmCEZRKoWJGSp"
+lamports = 1000000000000000000
+
+[[allocations]]
+# Operations reserve.
+pubkey = "9jhBSsexL7jmQraCz1knhxBGcEE4gTwrKmE5m8ivhLx"
+lamports = 500000000000000000
