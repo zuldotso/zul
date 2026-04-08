@@ -1,0 +1,23 @@
+{
+  "name": "@zul/indexer",
+  "version": "0.1.0",
+  "description": "Zul chain indexer: node RPC -> Postgres",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "dev": "tsx watch src/main.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@zul/db": "workspace:*"
+  },
+  "devDependencies": {
+    "@solana/web3.js": "^1.98.0",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
