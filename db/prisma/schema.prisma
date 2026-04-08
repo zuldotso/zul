@@ -1,0 +1,92 @@
+// ZUL explorer/indexer data model. Postgres + Prisma 6.
+// The indexer is the sole writer; the explorer reads.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Block {
+  slot          BigInt        @id
+  blockhash     String        @unique
+  parentHash    String
+  stateRoot     String
+  txCount       Int
+  timestampMs   BigInt
+  transactions  Transaction[]
+  createdAt     DateTime      @default(now())
+
+  @@index([timestampMs])
+}
+
+model Transaction {
+  signature        String   @id
+  slot             BigInt
+  indexInBlock     Int
+  success          Boolean
+  err              String?
+  fee              BigInt
+  computeUnits     BigInt
+  feePayer         String
+  accountKeys      String[]
+  logMessages      String[]
+  // Names of the programs invoked (decoded best-effort by the indexer).
+  programs         String[]
+  // True if this transaction touched the shielded pool program.
+  touchedPool      Boolean  @default(false)
+  createdAt        DateTime @default(now())
+
+  block            Block    @relation(fields: [slot], references: [slot], onDelete: Cascade)
+
+  @@index([slot])
+  @@index([feePayer])
+  @@index([touchedPool])
+}
+
+// Address -> signature index for account history pages.
+model AddressSignature {
+  id        BigInt @id @default(autoincrement())
+  address   String
+  signature String
+  slot      BigInt
+
+  @@unique([address, signature])
+  @@index([address, slot(sort: Desc)])
+}
+
+// Shielded pool activity parsed from the privacy program's logs.
+model ShieldedEvent {
+  id            BigInt   @id @default(autoincrement())
+  slot          BigInt
+  signature     String
+  kind          String   // "shield" | "transfer" | "unshield"
+  // Public, non-identifying counters only.
+  commitmentsAdded Int
+  nullifiersSpent  Int
+  feePaid          BigInt
+  createdAt     DateTime @default(now())
+
+  @@index([slot])
+  @@index([kind])
+}
+
+// Singleton rollup of pool-wide public stats.
+model PoolStat {
+  id              Int    @id @default(1)
+  commitmentCount BigInt @default(0)
+  nullifierCount  BigInt @default(0)
+  currentRoot     String @default("")
+  updatedAt       DateTime @updatedAt
+}
+
+// Indexer cursor + network meta (singleton row id = 1).
+model SyncState {
+  id            Int      @id @default(1)
+  lastSlot      BigInt   @default(0)
+  genesisHash   String   @default("")
+  updatedAt     DateTime @updatedAt
+}
