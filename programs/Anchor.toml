@@ -1,0 +1,24 @@
+[toolchain]
+anchor_version = "0.31.1"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+zul_settlement = "2hwZWDpMYAMVZrmMjjHuFK4jbMrTJq62fL9d5cPPadHh"
+zul_da_log = "3E3dFuiYPi8BXGQo2SUzU5ctZ41U9ARCiqAuNTUjnk2f"
+
+[programs.devnet]
+zul_settlement = "2hwZWDpMYAMVZrmMjjHuFK4jbMrTJq62fL9d5cPPadHh"
+zul_da_log = "3E3dFuiYPi8BXGQo2SUzU5ctZ41U9ARCiqAuNTUjnk2f"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "echo 'integration tests run against devnet in Phase 3'"
