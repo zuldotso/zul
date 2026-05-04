@@ -143,7 +143,7 @@ pub fn build_module<B: RpcBackend>(backend: Arc<B>, faucet_enabled: bool) -> Rpc
 
     module
         .register_method("getVersion", |_params, _ctx, _ext| {
-            // `solana-core` MUST be a valid semver ??the solana CLI parses
+            // `solana-core` MUST be a valid semver — the solana CLI parses
             // it and aborts on anything else. Report the Agave SVM base.
             Ok::<_, ErrorObjectOwned>(json!({
                 "solana-core": "3.1.14",
@@ -546,6 +546,30 @@ pub fn build_module<B: RpcBackend>(backend: Arc<B>, faucet_enabled: bool) -> Rpc
                     "returnData": Value::Null,
                 }),
             ))
+        })
+        .unwrap();
+
+    module
+        .register_method("getWithdrawalProof", |params, ctx, _ext| {
+            let parsed = params_array(params.parse().map_err(|_| invalid_params("bad params"))?);
+            let recipient = parse_pubkey(parsed.first())?.to_bytes();
+            let num = |v: Option<&Value>| -> Option<u64> {
+                v.and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+            };
+            let amount = num(parsed.get(1)).ok_or_else(|| invalid_params("expected amount"))?;
+            let nonce = num(parsed.get(2)).ok_or_else(|| invalid_params("expected nonce"))?;
+            let (state_root, proof) = ctx
+                .withdrawal_proof(&recipient, amount, nonce)
+                .map_err(invalid_params)?;
+            Ok::<_, ErrorObjectOwned>(json!({
+                "stateRoot": bs58::encode(state_root).into_string(),
+                "bitmap": bs58::encode(proof.bitmap).into_string(),
+                "siblings": proof
+                    .siblings
+                    .iter()
+                    .map(|s| bs58::encode(s).into_string())
+                    .collect::<Vec<_>>(),
+            }))
         })
         .unwrap();
 
