@@ -1,0 +1,18 @@
+{
+  "name": "zul-circuits",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zul shielded pool circom circuits + Groth16 setup",
+  "type": "module",
+  "scripts": {
+    "compile": "node scripts/compile.mjs",
+    "setup": "node scripts/setup.mjs",
+    "export-keys": "node scripts/export-vk.mjs",
+    "build": "npm run compile && npm run setup && npm run export-keys"
+  },
+  "dependencies": {
+    "circomlib": "2.0.5",
+    "circomlibjs": "^0.1.7",
+    "snarkjs": "0.7.5"
+  }
+}
