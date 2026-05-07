@@ -1,0 +1,580 @@
+//! Node-integrated shielded pool.
+//!
+//! The pool is enshrined in the node: pool transactions (a single
+//! instruction to `POOL_PROGRAM_ID`) are processed here rather than inside
+//! the SVM, so verification runs natively with no compute-unit ceiling. The
+//! service loads the on-chain `PoolState` account, checks nullifiers against
+//! the store, runs the `PoolProcessor` state machine, and returns the
+//! resulting account writes + spent nullifiers for the node to commit
+//! atomically with the block.
+//!
+//! v1 applies the native (ZUL) value path directly via lamport moves. The
+//! SPL (wSOL) path is recognized and validated but its vault token movement
+//! is a documented runtime-integration item (needs a token CPI); such
+//! instructions are rejected here rather than half-applied.
+
+use crate::instruction::{Asset, PoolInstruction};
+use crate::processor::{NoteEvent, NullifierSet, PoolEffect, PoolProcessor, ProofVerifier};
+use crate::state::PoolState;
+use zul_primitives::constants::LAMPORTS_PER_SIGNATURE;
+use zul_store::{StoredAccount, Store};
+use solana_sdk::pubkey::Pubkey;
+use std::collections::{HashMap, HashSet};
+
+/// Addresses the pool operates over.
+#[derive(Debug, Clone)]
+pub struct PoolConfig {
+    /// Account holding the serialized `PoolState`.
+    pub pool_state: Pubkey,
+    /// Native vault holding shielded ZUL lamports.
+    pub vault: Pubkey,
+    /// Where pool transaction fees accrue.
+    pub fee_collector: Pubkey,
+    /// Flat fee charged to the fee payer per pool transaction (mirrors the
+    /// one-signature SVM fee so pool and regular txs cost the same).
+    pub flat_fee: u64,
+}
+
+impl PoolConfig {
+    pub fn new(pool_state: Pubkey, vault: Pubkey, fee_collector: Pubkey) -> Self {
+        Self {
+            pool_state,
+            vault,
+            fee_collector,
+            flat_fee: LAMPORTS_PER_SIGNATURE,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PoolServiceError {
+    #[error("store error: {0}")]
+    Store(#[from] zul_store::StoreError),
+    #[error("pool state account is corrupt")]
+    CorruptState,
+    #[error("pool error: {0}")]
+    Pool(#[from] crate::processor::PoolError),
+    #[error("insufficient funds for {0}")]
+    InsufficientFunds(&'static str),
+    #[error("SPL pool effects require a token CPI (roadmap); rejected in v1")]
+    SplUnsupported,
+}
+
+/// Outcome of processing a block's pool transactions.
+#[derive(Debug, Default)]
+pub struct PoolBlockResult {
+    pub account_writes: Vec<(Pubkey, Option<StoredAccount>)>,
+    pub nullifiers: Vec<[u8; 32]>,
+    pub note_events: Vec<NoteEvent>,
+    /// Per-input-transaction result, in order: Ok or the rejection reason.
+    pub statuses: Vec<Result<(), String>>,
+}
+
+/// Nullifier membership bridging the committed store and within-block spends.
+struct BlockNullifiers<'a> {
+    store: &'a Store,
+    within: HashSet<[u8; 32]>,
+    newly: Vec<[u8; 32]>,
+}
+
+impl NullifierSet for BlockNullifiers<'_> {
+    fn contains(&self, nullifier: &[u8; 32]) -> bool {
+        self.within.contains(nullifier)
+            || self.store.is_nullifier_spent(nullifier).unwrap_or(false)
+    }
+    fn insert(&mut self, nullifier: [u8; 32]) {
+        self.within.insert(nullifier);
+        self.newly.push(nullifier);
+    }
+}
+
+pub struct PoolService<V: ProofVerifier> {
+    verifier: V,
+    config: PoolConfig,
+}
+
+impl<V: ProofVerifier> PoolService<V> {
+    pub fn new(verifier: V, config: PoolConfig) -> Self {
+        Self { verifier, config }
+    }
+
+    /// The genesis account for the pool state (empty tree). Added to genesis
+    /// alongside the executor's builtin accounts.
+    pub fn genesis_pool_account(&self) -> (Pubkey, StoredAccount) {
+        let state = PoolState::new();
+        let account = StoredAccount {
+            lamports: 1,
+            data: state.to_bytes(),
+            owner: crate::POOL_PROGRAM_ID,
+            executable: false,
+            rent_epoch: zul_store::RENT_EXEMPT_RENT_EPOCH,
+        };
+        (self.config.pool_state, account)
+    }
+
+    fn load_state(&self, store: &Store) -> Result<PoolState, PoolServiceError> {
+        match store.get_account(&self.config.pool_state)? {
+            Some(account) => {
+                PoolState::from_bytes(&account.data).map_err(|_| PoolServiceError::CorruptState)
+            }
+            None => Ok(PoolState::new()),
+        }
+    }
+
+    /// Process every pool transaction in a block. `txs` pairs each pool
+    /// instruction with its fee payer. Failing transactions are skipped (no
+    /// state change, no fee) and reported in `statuses`.
+    pub fn process_block(
+        &self,
+        store: &Store,
+        txs: &[(Pubkey, PoolInstruction)],
+    ) -> Result<PoolBlockResult, PoolServiceError> {
+        self.process_block_seeded(store, txs, &HashMap::new())
+    }
+
+    /// Like `process_block`, but layered over `seed` lamport balances (the
+    /// post-SVM account states for this block), so pool effects see and
+    /// extend the regular transactions' results within the same block.
+    pub fn process_block_seeded(
+        &self,
+        store: &Store,
+        txs: &[(Pubkey, PoolInstruction)],
+        seed: &HashMap<Pubkey, u64>,
+    ) -> Result<PoolBlockResult, PoolServiceError> {
+        let mut result = PoolBlockResult::default();
+        if txs.is_empty() {
+            return Ok(result);
+        }
+
+        let mut state = self.load_state(store)?;
+        let mut nullifiers = BlockNullifiers {
+            store,
+            within: HashSet::new(),
+            newly: Vec::new(),
+        };
+        // Lamport overlay seeded with this block's SVM results.
+        let mut overlay: HashMap<Pubkey, u64> = seed.clone();
+        let mut state_dirty = false;
+
+        for (fee_payer, instruction) in txs {
+            match self.apply_one(
+                store,
+                &mut state,
+                &mut nullifiers,
+                &mut overlay,
+                fee_payer,
+                instruction,
+                &mut result.note_events,
+            ) {
+                Ok(()) => {
+                    state_dirty = true;
+                    result.statuses.push(Ok(()));
+                }
+                Err(e) => result.statuses.push(Err(e.to_string())),
+            }
+        }
+
+        // Assemble account writes from the overlay.
+        for (pubkey, lamports) in overlay {
+            let write = self.lamport_write(store, pubkey, lamports)?;
+            result.account_writes.push((pubkey, write));
+        }
+        // Persist the pool state account if anything changed.
+        if state_dirty {
+            let mut account = store
+                .get_account(&self.config.pool_state)?
+                .unwrap_or_else(|| self.genesis_pool_account().1);
+            account.data = state.to_bytes();
+            result
+                .account_writes
+                .push((self.config.pool_state, Some(account)));
+        }
+        result.nullifiers = nullifiers.newly;
+        Ok(result)
+    }
+
+    /// Apply a single pool transaction against the running overlay. On error
+    /// nothing in `state`/`overlay`/`nullifiers` is left partially applied:
+    /// fund pre-checks and SPL rejection happen before any mutation, and the
+    /// processor itself does not mutate on failure.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_one(
+        &self,
+        store: &Store,
+        state: &mut PoolState,
+        nullifiers: &mut BlockNullifiers,
+        overlay: &mut HashMap<Pubkey, u64>,
+        fee_payer: &Pubkey,
+        instruction: &PoolInstruction,
+        note_events: &mut Vec<NoteEvent>,
+    ) -> Result<(), PoolServiceError> {
+        // Reject unsupported SPL effects up front.
+        if instruction_uses_spl(instruction) {
+            return Err(PoolServiceError::SplUnsupported);
+        }
+
+        // Pre-check public funds so effect application cannot fail midway.
+        let fee = self.config.flat_fee;
+        match instruction {
+            PoolInstruction::Shield { amount, .. } => {
+                let need = amount.saturating_add(fee);
+                if self.balance(store, overlay, fee_payer) < need {
+                    return Err(PoolServiceError::InsufficientFunds("shield"));
+                }
+            }
+            PoolInstruction::Transfer { fee: tfee, .. } => {
+                if self.balance(store, overlay, fee_payer) < fee {
+                    return Err(PoolServiceError::InsufficientFunds("transfer fee"));
+                }
+                if self.balance(store, overlay, &self.config.vault) < *tfee {
+                    return Err(PoolServiceError::InsufficientFunds("pool fee"));
+                }
+            }
+            PoolInstruction::Unshield { amount, .. } => {
+                if self.balance(store, overlay, fee_payer) < fee {
+                    return Err(PoolServiceError::InsufficientFunds("unshield fee"));
+                }
+                if self.balance(store, overlay, &self.config.vault) < *amount {
+                    return Err(PoolServiceError::InsufficientFunds("vault"));
+                }
+            }
+        }
+
+        // Run the verified state machine.
+        let processor = PoolProcessor::new(&self.verifier);
+        let outcome = processor.process(state, nullifiers, instruction)?;
+
+        // Charge the per-tx fee to the collector.
+        self.move_lamports(store, overlay, fee_payer, &self.config.fee_collector, fee);
+
+        // Apply value effects (native only — SPL rejected above).
+        for effect in outcome.effects {
+            match effect {
+                PoolEffect::DepositToVault { amount, .. } => {
+                    self.move_lamports(store, overlay, fee_payer, &self.config.vault, amount);
+                }
+                PoolEffect::WithdrawFromVault { amount, recipient, .. } => {
+                    self.move_lamports(store, overlay, &self.config.vault, &recipient, amount);
+                }
+                PoolEffect::PayFee { amount } => {
+                    self.move_lamports(
+                        store,
+                        overlay,
+                        &self.config.vault,
+                        &self.config.fee_collector,
+                        amount,
+                    );
+                }
+            }
+        }
+        note_events.extend(outcome.note_events);
+        Ok(())
+    }
+
+    fn balance(&self, store: &Store, overlay: &HashMap<Pubkey, u64>, key: &Pubkey) -> u64 {
+        if let Some(v) = overlay.get(key) {
+            return *v;
+        }
+        store
+            .get_account(key)
+            .ok()
+            .flatten()
+            .map(|a| a.lamports)
+            .unwrap_or(0)
+    }
+
+    fn move_lamports(
+        &self,
+        store: &Store,
+        overlay: &mut HashMap<Pubkey, u64>,
+        from: &Pubkey,
+        to: &Pubkey,
+        amount: u64,
+    ) {
+        let from_bal = self.balance(store, overlay, from);
+        let to_bal = self.balance(store, overlay, to);
+        overlay.insert(*from, from_bal.saturating_sub(amount));
+        overlay.insert(*to, to_bal.saturating_add(amount));
+    }
+
+    /// Build the store write for an overlay balance, preserving non-lamport
+    /// fields of any existing account.
+    fn lamport_write(
+        &self,
+        store: &Store,
+        pubkey: Pubkey,
+        lamports: u64,
+    ) -> Result<Option<StoredAccount>, PoolServiceError> {
+        if lamports == 0 {
+            // Keep the vault/collector alive even at zero; only drop unknown
+            // accounts that never existed.
+            if store.get_account(&pubkey)?.is_none() {
+                return Ok(None);
+            }
+        }
+        let mut account = store
+            .get_account(&pubkey)?
+            .unwrap_or_else(|| StoredAccount::new_system(0));
+        account.lamports = lamports;
+        Ok(Some(account))
+    }
+}
+
+fn instruction_uses_spl(instruction: &PoolInstruction) -> bool {
+    match instruction {
+        PoolInstruction::Shield { asset, .. } => matches!(asset, Asset::Spl(_)),
+        PoolInstruction::Unshield { asset, .. } => matches!(asset, Asset::Spl(_)),
+        // Transfers never move public asset value (only the native fee).
+        PoolInstruction::Transfer { .. } => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::field::fr_to_bytes;
+    use crate::poseidon::{native_asset_id, note_commitment};
+    use crate::processor::ProofVerifier;
+    use ark_bn254::Fr;
+    use zul_primitives::genesis::{Allocation, GenesisConfig};
+    use solana_sdk::signature::Keypair;
+    use solana_sdk::signer::Signer;
+
+    struct AcceptAll;
+    impl ProofVerifier for AcceptAll {
+        fn verify_transfer(&self, _p: &[u8], _i: &[Fr]) -> bool {
+            true
+        }
+        fn verify_unshield(&self, _p: &[u8], _i: &[Fr]) -> bool {
+            true
+        }
+    }
+
+    const ZUL: u64 = 1_000_000_000;
+
+    fn config() -> PoolConfig {
+        PoolConfig::new(
+            crate::POOL_PROGRAM_ID,
+            Pubkey::new_from_array([0x0a; 32]),
+            Pubkey::new_from_array([0x0c; 32]),
+        )
+    }
+
+    fn setup() -> (tempfile::TempDir, Store, Keypair, PoolConfig) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("zul.redb")).unwrap();
+        let user = Keypair::new();
+        let cfg = config();
+        let service = PoolService::new(AcceptAll, cfg.clone());
+        let genesis = GenesisConfig {
+            chain_name: "zul-pool-test".into(),
+            creation_time_ms: 1,
+            sequencer: Pubkey::new_unique(),
+            fee_collector: cfg.fee_collector,
+            allocations: vec![Allocation {
+                pubkey: user.pubkey(),
+                lamports: 100 * ZUL,
+            }],
+        };
+        store
+            .initialize_genesis(&genesis, &[service.genesis_pool_account()])
+            .unwrap();
+        (dir, store, user, cfg)
+    }
+
+    fn commit(result: &PoolBlockResult, store: &Store) {
+        // Apply the result's writes directly (test shortcut for what the
+        // node does inside commit_block).
+        use zul_primitives::block::{Block, BlockHeader};
+        use zul_store::LeafUpdate;
+        let leaf_updates: Vec<LeafUpdate> = result
+            .account_writes
+            .iter()
+            .map(|(pk, acc)| (*pk, acc.as_ref().map(|a| a.hash(pk))))
+            .collect();
+        let update = store.prepare_state_update(&leaf_updates).unwrap();
+        let latest = store.latest_slot().unwrap();
+        let slot = latest.map(|s| s + 1).unwrap_or(0);
+        let header = BlockHeader {
+            slot,
+            parent_hash: [0u8; 32],
+            state_root: update.new_root,
+            transactions_root: Block::transactions_root(&[]),
+            timestamp_ms: slot,
+            transaction_count: 0,
+        };
+        let block = Block::seal(header, vec![], &Keypair::new());
+        let mut queue = zul_store::BlockhashQueue::new();
+        queue.register(slot, block.header.hash());
+        store
+            .commit_block(&block, &[], &result.account_writes, &update, &queue, &result.nullifiers)
+            .unwrap();
+    }
+
+    fn native_commitment(amount: u64, blinding: u64) -> [u8; 32] {
+        let pk = crate::poseidon::hash1(Fr::from(1u64));
+        fr_to_bytes(&note_commitment(native_asset_id(), amount, pk, Fr::from(blinding)))
+    }
+
+    /// Canonical field element from a small integer (raw [n; 32] bytes can
+    /// exceed the BN254 modulus and are rejected as non-canonical).
+    fn field(n: u64) -> [u8; 32] {
+        fr_to_bytes(&Fr::from(n))
+    }
+
+    /// The opaque shield secret for a note with the given blinding.
+    fn native_secret(blinding: u64) -> [u8; 32] {
+        let pk = crate::poseidon::hash1(Fr::from(1u64));
+        fr_to_bytes(&crate::poseidon::note_secret(pk, Fr::from(blinding)))
+    }
+
+    #[test]
+    fn shield_moves_funds_to_vault_and_grows_tree() {
+        let (_dir, store, user, cfg) = setup();
+        let service = PoolService::new(AcceptAll, cfg.clone());
+
+        let amount = 10 * ZUL;
+        let ix = PoolInstruction::Shield {
+            asset: Asset::Native,
+            amount,
+            secret: native_secret(1),
+            encrypted_note: vec![0xab; 48],
+        };
+        let result = service.process_block(&store, &[(user.pubkey(), ix)]).unwrap();
+        assert_eq!(result.statuses, vec![Ok(())]);
+        assert_eq!(result.note_events.len(), 1);
+        assert_eq!(result.nullifiers.len(), 0);
+        commit(&result, &store);
+
+        // User debited amount + fee; vault credited amount.
+        let user_bal = store.get_account(&user.pubkey()).unwrap().unwrap().lamports;
+        assert_eq!(user_bal, 100 * ZUL - amount - LAMPORTS_PER_SIGNATURE);
+        let vault_bal = store.get_account(&cfg.vault).unwrap().unwrap().lamports;
+        assert_eq!(vault_bal, amount);
+        let collector_bal = store.get_account(&cfg.fee_collector).unwrap().unwrap().lamports;
+        assert_eq!(collector_bal, LAMPORTS_PER_SIGNATURE);
+
+        // The pool state account now has one commitment.
+        let state = PoolState::from_bytes(
+            &store.get_account(&cfg.pool_state).unwrap().unwrap().data,
+        )
+        .unwrap();
+        assert_eq!(state.next_leaf_index, 1);
+    }
+
+    #[test]
+    fn shield_rejected_when_underfunded() {
+        let (_dir, store, user, cfg) = setup();
+        let service = PoolService::new(AcceptAll, cfg);
+        let ix = PoolInstruction::Shield {
+            asset: Asset::Native,
+            amount: 1_000 * ZUL, // more than the user holds
+            secret: native_secret(1),
+            encrypted_note: vec![],
+        };
+        let result = service.process_block(&store, &[(user.pubkey(), ix)]).unwrap();
+        assert!(result.statuses[0].is_err());
+        assert!(result.account_writes.is_empty());
+        assert!(result.nullifiers.is_empty());
+    }
+
+    #[test]
+    fn spl_shield_is_rejected_in_v1() {
+        let (_dir, store, user, cfg) = setup();
+        let service = PoolService::new(AcceptAll, cfg);
+        let ix = PoolInstruction::Shield {
+            asset: Asset::Spl([7u8; 32]),
+            amount: ZUL,
+            secret: native_secret(1),
+            encrypted_note: vec![],
+        };
+        let result = service.process_block(&store, &[(user.pubkey(), ix)]).unwrap();
+        assert!(result.statuses[0]
+            .as_ref()
+            .err()
+            .unwrap()
+            .contains("SPL"));
+    }
+
+    #[test]
+    fn double_spend_across_blocks_is_rejected() {
+        let (_dir, store, user, cfg) = setup();
+        let service = PoolService::new(AcceptAll, cfg.clone());
+
+        // Seed the vault and tree with a shield so a transfer has a valid root.
+        let shield = PoolInstruction::Shield {
+            asset: Asset::Native,
+            amount: 20 * ZUL,
+            secret: native_secret(9),
+            encrypted_note: vec![],
+        };
+        let r0 = service.process_block(&store, &[(user.pubkey(), shield)]).unwrap();
+        commit(&r0, &store);
+
+        let root = {
+            let s = PoolState::from_bytes(
+                &store.get_account(&cfg.pool_state).unwrap().unwrap().data,
+            )
+            .unwrap();
+            s.current_root()
+        };
+        let transfer = PoolInstruction::Transfer {
+            proof: vec![0u8; 256],
+            root,
+            nullifiers: [field(0x33), field(0x34)],
+            commitments: [native_commitment(10 * ZUL, 1), native_commitment(10 * ZUL, 2)],
+            fee: 0,
+            encrypted_notes: [vec![], vec![]],
+        };
+        let r1 = service.process_block(&store, &[(user.pubkey(), transfer.clone())]).unwrap();
+        assert_eq!(r1.statuses, vec![Ok(())]);
+        assert_eq!(r1.nullifiers.len(), 2);
+        commit(&r1, &store);
+
+        // Replaying the same nullifiers in a later block is rejected.
+        let r2 = service.process_block(&store, &[(user.pubkey(), transfer)]).unwrap();
+        assert!(r2.statuses[0].as_ref().err().unwrap().contains("double spend"));
+        assert!(r2.nullifiers.is_empty());
+    }
+
+    #[test]
+    fn unshield_releases_native_funds_to_recipient() {
+        let (_dir, store, user, cfg) = setup();
+        let service = PoolService::new(AcceptAll, cfg.clone());
+
+        // Fund the vault via a shield first.
+        let shield = PoolInstruction::Shield {
+            asset: Asset::Native,
+            amount: 30 * ZUL,
+            secret: native_secret(5),
+            encrypted_note: vec![],
+        };
+        let r0 = service.process_block(&store, &[(user.pubkey(), shield)]).unwrap();
+        commit(&r0, &store);
+        let root = PoolState::from_bytes(
+            &store.get_account(&cfg.pool_state).unwrap().unwrap().data,
+        )
+        .unwrap()
+        .current_root();
+
+        let recipient = Pubkey::new_unique();
+        let unshield = PoolInstruction::Unshield {
+            proof: vec![0u8; 256],
+            root,
+            nullifier: field(0x44),
+            change_commitment: native_commitment(5 * ZUL, 7),
+            asset: Asset::Native,
+            amount: 25 * ZUL,
+            recipient: recipient.to_bytes(),
+            encrypted_change_note: vec![],
+        };
+        let r1 = service.process_block(&store, &[(user.pubkey(), unshield)]).unwrap();
+        assert_eq!(r1.statuses, vec![Ok(())]);
+        commit(&r1, &store);
+
+        let recipient_bal = store.get_account(&recipient).unwrap().unwrap().lamports;
+        assert_eq!(recipient_bal, 25 * ZUL);
+        let vault_bal = store.get_account(&cfg.vault).unwrap().unwrap().lamports;
+        assert_eq!(vault_bal, 30 * ZUL - 25 * ZUL);
+    }
+}

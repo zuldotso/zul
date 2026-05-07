@@ -5,14 +5,27 @@
 //! reveal nullifiers; a Groth16 proof over BN254 enforces ownership, value
 //! conservation, and asset-id consistency. Verification runs natively in
 //! the node (no CU budget concerns) — this crate owns that logic and the
-//! pool state machine.
+//! pool state machine; the executor registers the pool as an enshrined
+//! builtin and the node applies the resulting public fund movements.
 
 pub mod field;
 pub mod instruction;
 pub mod poseidon;
+pub mod processor;
+pub mod service;
+pub mod state;
+pub mod verifier;
+pub mod verifying_keys;
 
 pub use field::{fr_from_bytes, fr_to_bytes, FieldBytes};
 pub use instruction::{Asset, InstructionError, PoolInstruction};
+pub use processor::{
+    NoteEvent, NullifierSet, PoolEffect, PoolError, PoolOutcome, PoolProcessor, ProofVerifier,
+};
+pub use service::{PoolBlockResult, PoolConfig, PoolService, PoolServiceError};
+pub use state::{PoolState, PoolStateError, ROOT_HISTORY, TREE_DEPTH};
+pub use verifier::VerifierError;
+pub use verifying_keys::{Groth16Verifier, VerifyingKeys};
 
 use solana_sdk::pubkey::Pubkey;
 
