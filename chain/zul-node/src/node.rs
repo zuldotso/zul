@@ -5,8 +5,15 @@ use zul_executor::{BlockExecutionInput, Executor};
 use zul_primitives::block::{Block, BlockHeader};
 use zul_primitives::genesis::GenesisConfig;
 use zul_primitives::hash::H256;
+use zul_primitives::meta::ExecutedTransactionMeta;
+use zul_privacy::{
+    Groth16Verifier, PoolConfig, PoolService, VerifyingKeys, POOL_STATE_ADDRESS,
+    POOL_VAULT_ADDRESS,
+};
+use zul_bridge::DepositEvent;
 use zul_rpc::{BackendError, BlockNotification, RpcBackend, SimulationResult};
-use zul_store::{BlockhashQueue, LeafUpdate, Store};
+use zul_store::smt::NodeKey;
+use zul_store::{BlockhashQueue, LeafUpdate, Store, StoredAccount};
 use solana_sdk::{
     hash::Hash,
     pubkey::Pubkey,
@@ -15,11 +22,13 @@ use solana_sdk::{
     transaction::VersionedTransaction,
 };
 use solana_system_interface::instruction as system_instruction;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::sync::broadcast;
+
+use crate::pool;
 
 pub struct NodeOptions {
     pub slot_duration: Duration,
@@ -27,11 +36,16 @@ pub struct NodeOptions {
     /// one (keeps the chain visibly alive without spamming empty slots).
     pub heartbeat: Duration,
     pub mempool_capacity: usize,
-    /// Max transactions one fee payer may hold in the mempool at once.
+    /// Max transactions one fee payer may hold in the mempool at once
+    /// (anti-spam: stops a single key from filling the queue).
     pub max_per_payer: usize,
     pub max_block_transactions: usize,
     pub faucet: Option<Keypair>,
     pub faucet_max_lamports: u64,
+    /// Shielded-pool Groth16 verifying keys. Unconfigured (default) rejects
+    /// every transfer/unshield proof — the pool is closed-but-safe until
+    /// keys are loaded; shields (no proof) still work.
+    pub pool_verifying_keys: VerifyingKeys,
 }
 
 impl Default for NodeOptions {
@@ -46,6 +60,7 @@ impl Default for NodeOptions {
             max_block_transactions: 1_024,
             faucet: None,
             faucet_max_lamports: 10_000_000_000,
+            pool_verifying_keys: VerifyingKeys::unconfigured(),
         }
     }
 }
@@ -60,15 +75,25 @@ struct ChainTip {
 pub struct Node {
     store: Arc<Store>,
     executor: Executor,
+    pool: PoolService<Groth16Verifier>,
     sequencer: Keypair,
+    fee_collector: Pubkey,
     tip: RwLock<ChainTip>,
     mempool: Mutex<crate::mempool::Mempool>,
     options: NodeOptions,
     /// Set during shutdown so `is_healthy` reports false and a load balancer
     /// drains this node before the process exits.
     draining: AtomicBool,
+    /// Transactions committed since boot (metrics counter).
     total_txs: AtomicU64,
+    /// Per-block notifications for WebSocket subscriptions.
     notifier: broadcast::Sender<Arc<BlockNotification>>,
+    /// L1 deposits awaiting an L2 credit (enqueued by the deposit watcher,
+    /// applied + deduplicated atomically in `try_produce_block`).
+    pending_deposits: Mutex<VecDeque<DepositEvent>>,
+    /// In-memory shallow (depth-32) sparse Merkle tree of withdrawal
+    /// commitments; its root is posted to L1 for `claim_withdrawal`.
+    withdrawals: Mutex<HashMap<NodeKey, H256>>,
 }
 
 fn now_ms() -> u64 {
@@ -84,6 +109,7 @@ impl Node {
         store: Arc<Store>,
         genesis: &GenesisConfig,
         sequencer: Keypair,
+        extra_builtins: Vec<zul_executor::builtins::BuiltinSpec>,
         options: NodeOptions,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
@@ -93,11 +119,24 @@ impl Node {
             genesis.sequencer
         );
 
-        let executor = Executor::new(genesis.fee_collector, vec![])?;
-        let genesis_accounts = executor.genesis_accounts();
+        let executor = Executor::new(genesis.fee_collector, extra_builtins)?;
+
+        // The shielded pool is enshrined in the node (processed outside the
+        // SVM). Its state account is part of genesis.
+        let pool_config =
+            PoolConfig::new(POOL_STATE_ADDRESS, POOL_VAULT_ADDRESS, genesis.fee_collector);
+        let pool = PoolService::new(
+            Groth16Verifier::new(options.pool_verifying_keys.clone()),
+            pool_config,
+        );
+
+        let mut genesis_accounts = executor.genesis_accounts();
+        genesis_accounts.push(pool.genesis_pool_account());
         store.initialize_genesis(genesis, &genesis_accounts)?;
         let genesis_hash = genesis.genesis_hash();
 
+        // Restore tip state. The queue is persisted with every commit; on
+        // first boot register the genesis hash as the slot-0 "blockhash".
         let (queue, slot, blockhash) = match store.latest_slot()? {
             Some(latest) => {
                 let queue = store
@@ -117,10 +156,12 @@ impl Node {
 
         let mempool =
             crate::mempool::Mempool::new(options.mempool_capacity, options.max_per_payer);
-        Ok(Self {
+        let node = Self {
             store,
             executor,
+            pool,
             sequencer,
+            fee_collector: genesis.fee_collector,
             tip: RwLock::new(ChainTip {
                 queue,
                 slot,
@@ -132,7 +173,200 @@ impl Node {
             draining: AtomicBool::new(false),
             total_txs: AtomicU64::new(0),
             notifier: broadcast::channel(1024).0,
-        })
+            pending_deposits: Mutex::new(VecDeque::new()),
+            withdrawals: Mutex::new(HashMap::new()),
+        };
+        node.rebuild_withdrawals()?;
+        Ok(node)
+    }
+
+    /// Rebuild the in-memory withdrawals tree from committed blocks (the tree
+    /// is not persisted; the blocks are its source of truth). Only successful
+    /// withdrawals committed a leaf, so each is checked against its tx status.
+    fn rebuild_withdrawals(&self) -> anyhow::Result<()> {
+        let latest = self.store.latest_slot()?.unwrap_or(0);
+        let mut tree = self.withdrawals.lock().unwrap();
+        if latest > 0 {
+            for slot in self.store.block_slots_in_range(1, latest, usize::MAX)? {
+                let Some(block) = self.store.get_block(slot)? else { continue };
+                let (withdraws, _) = crate::bridge::partition_withdraws(block.transactions.clone());
+                for w in withdraws {
+                    let succeeded = w
+                        .transaction
+                        .signatures
+                        .first()
+                        .and_then(|sig| self.store.get_transaction(sig).ok().flatten())
+                        .map(|(_, _, meta)| meta.status.is_ok())
+                        .unwrap_or(false);
+                    if succeeded {
+                        crate::withdraw_smt::apply(
+                            &mut tree,
+                            &crate::bridge::withdrawal_pubkey(&w.recipient, w.nonce),
+                            &crate::bridge::withdrawal_account_hash(&w.recipient, w.amount, w.nonce),
+                        );
+                    }
+                }
+            }
+        }
+        let root = crate::withdraw_smt::root(&tree);
+        drop(tree);
+        self.store.set_withdrawals_root(&root)?;
+        Ok(())
+    }
+
+    /// Queue L1 deposits for crediting on the L2 (called by the deposit
+    /// watcher). Credits are applied + deduplicated in `try_produce_block`.
+    pub fn enqueue_deposits(&self, deposits: Vec<DepositEvent>) {
+        self.pending_deposits.lock().unwrap().extend(deposits);
+    }
+
+    /// Apply queued deposits into this block's account writes, exactly once.
+    /// Each deposit mints its `amount` to the recipient on the L2 (backed by
+    /// the SOL held in the L1 vault) and writes a receipt account whose
+    /// existence marks the L1 signature as credited — committed atomically
+    /// with the credit, so a crash never double-credits or loses a deposit
+    /// (the watcher re-fetches uncredited deposits from L1).
+    fn apply_deposits(
+        &self,
+        deposits: &[DepositEvent],
+        writes: &mut HashMap<Pubkey, Option<StoredAccount>>,
+    ) -> anyhow::Result<usize> {
+        let mut credited = 0;
+        for deposit in deposits {
+            let receipt = crate::bridge::deposit_receipt_address(&deposit.l1_signature);
+            // Skip if already credited in this block or in a committed block.
+            if writes.contains_key(&receipt) || self.store.get_account(&receipt)?.is_some() {
+                continue;
+            }
+            let mut account = writes
+                .get(&deposit.l2_recipient)
+                .cloned()
+                .flatten()
+                .or(self.store.get_account(&deposit.l2_recipient)?)
+                .unwrap_or_else(|| StoredAccount::new_system(0));
+            account.lamports = account.lamports.saturating_add(deposit.amount);
+            writes.insert(deposit.l2_recipient, Some(account));
+
+            let mut data = Vec::with_capacity(40);
+            data.extend_from_slice(&deposit.amount.to_le_bytes());
+            data.extend_from_slice(deposit.l2_recipient.as_ref());
+            writes.insert(
+                receipt,
+                Some(StoredAccount {
+                    lamports: 0,
+                    data,
+                    owner: crate::bridge::BRIDGE_RECEIPT_OWNER,
+                    executable: false,
+                    rent_epoch: u64::MAX,
+                }),
+            );
+            tracing::info!(
+                recipient = %deposit.l2_recipient,
+                amount = deposit.amount,
+                l1_sig = %deposit.l1_signature,
+                "credited L1 deposit on L2"
+            );
+            credited += 1;
+        }
+        Ok(credited)
+    }
+
+    /// Apply bridge withdrawals: burn `amount + fee` from the withdrawer.
+    /// Returns the `(withdrawal_pubkey, account_hash)` leaves to insert into
+    /// the withdrawals tree once the block commits — the L1 `claim_withdrawal`
+    /// recomputes that hash and proves its inclusion.
+    fn apply_withdraws(
+        &self,
+        withdraws: Vec<crate::bridge::WithdrawTx>,
+        writes: &mut HashMap<Pubkey, Option<StoredAccount>>,
+        included: &mut Vec<(VersionedTransaction, ExecutedTransactionMeta)>,
+    ) -> Vec<(Pubkey, H256)> {
+        let mut leaves = Vec::new();
+        for w in withdraws {
+            let payer = writes
+                .get(&w.fee_payer)
+                .cloned()
+                .flatten()
+                .or(self.store.get_account(&w.fee_payer).ok().flatten());
+            let total = w.amount.saturating_add(pool::POOL_TX_FEE);
+            match payer {
+                Some(mut acc) if acc.lamports >= total && w.amount > 0 => {
+                    acc.lamports -= total;
+                    let post = acc.lamports;
+                    writes.insert(w.fee_payer, Some(acc));
+
+                    // Fee to the collector (the withdrawn amount is burned;
+                    // the matching SOL is released from the L1 vault on claim).
+                    let mut collector = writes
+                        .get(&self.fee_collector)
+                        .cloned()
+                        .flatten()
+                        .or(self.store.get_account(&self.fee_collector).ok().flatten())
+                        .unwrap_or_else(|| StoredAccount::new_system(0));
+                    collector.lamports = collector.lamports.saturating_add(pool::POOL_TX_FEE);
+                    writes.insert(self.fee_collector, Some(collector));
+
+                    leaves.push((
+                        crate::bridge::withdrawal_pubkey(&w.recipient, w.nonce),
+                        crate::bridge::withdrawal_account_hash(&w.recipient, w.amount, w.nonce),
+                    ));
+                    tracing::info!(
+                        amount = w.amount,
+                        nonce = w.nonce,
+                        "committed L2 withdrawal (claimable on L1 once settled)"
+                    );
+                    included.push((
+                        w.transaction,
+                        pool::pool_meta(
+                            true,
+                            None,
+                            pool::POOL_TX_FEE,
+                            0,
+                            post,
+                            vec![format!(
+                                "Program log: withdraw {} lamports to L1, nonce {}",
+                                w.amount, w.nonce
+                            )],
+                        ),
+                    ));
+                }
+                _ => included.push((
+                    w.transaction,
+                    pool::pool_meta(
+                        false,
+                        Some("insufficient balance for withdrawal".into()),
+                        0,
+                        0,
+                        0,
+                        vec![],
+                    ),
+                )),
+            }
+        }
+        leaves
+    }
+
+    /// SMT inclusion proof for a withdrawal commitment against the current
+    /// state root — serves `getWithdrawalProof` so a user can claim on L1.
+    pub fn compute_withdrawal_proof(
+        &self,
+        recipient: &[u8; 32],
+        amount: u64,
+        nonce: u64,
+    ) -> anyhow::Result<(H256, zul_store::SmtProof)> {
+        let leaf = crate::bridge::withdrawal_pubkey(recipient, nonce);
+        let account_hash = crate::bridge::withdrawal_account_hash(recipient, amount, nonce);
+        let tree = self.withdrawals.lock().unwrap();
+        let proof = crate::withdraw_smt::prove(&tree, &leaf);
+        let root = crate::withdraw_smt::root(&tree);
+        drop(tree);
+        // Sanity: the proof must verify against the current withdrawals root,
+        // so the caller gets a usable proof or a clear error.
+        anyhow::ensure!(
+            crate::withdraw_smt::verify(&root, &leaf, &account_hash, &proof),
+            "withdrawal commitment not found (not yet committed?)"
+        );
+        Ok((root, proof))
     }
 
     /// Flip the node into draining: `is_healthy` reports false so a monitor or
@@ -145,15 +379,19 @@ impl Node {
         self.options.slot_duration
     }
 
+    /// Milliseconds since the last block was committed — the liveness signal
+    /// behind `getHealth` and the `/metrics` gauges.
     pub fn last_block_age_ms(&self) -> u64 {
         let tip = self.tip.read().unwrap();
         now_ms().saturating_sub(tip.last_block_unix_ms)
     }
 
+    /// Transactions currently waiting in the mempool.
     pub fn mempool_depth(&self) -> usize {
         self.mempool.lock().unwrap().len()
     }
 
+    /// Transactions committed since boot (metrics counter).
     pub fn total_txs(&self) -> u64 {
         self.total_txs.load(Ordering::Relaxed)
     }
@@ -165,9 +403,13 @@ impl Node {
             let mut mempool = self.mempool.lock().unwrap();
             mempool.drain(self.options.max_block_transactions)
         };
+        let deposits: Vec<DepositEvent> = {
+            let mut queue = self.pending_deposits.lock().unwrap();
+            queue.drain(..).collect()
+        };
 
         let timestamp_ms = now_ms();
-        if transactions.is_empty() {
+        if transactions.is_empty() && deposits.is_empty() {
             let tip = self.tip.read().unwrap();
             let due = timestamp_ms.saturating_sub(tip.last_block_unix_ms)
                 >= self.options.heartbeat.as_millis() as u64;
@@ -182,13 +424,18 @@ impl Node {
         let slot = tip.slot + 1;
         let parent_hash = tip.blockhash;
 
+        // Bridge withdrawals and pool transactions are handled natively,
+        // outside the SVM batch.
+        let (withdraw_txs, rest) = crate::bridge::partition_withdraws(transactions);
+        let (pool_txs, regular_txs) = pool::partition(rest);
+
         let output = self.executor.execute_block(
             &self.store,
             BlockExecutionInput {
                 slot,
                 timestamp_ms,
                 parent_blockhash: Hash::new_from_array(parent_hash),
-                transactions,
+                transactions: regular_txs,
                 queue: &tip.queue,
             },
         )?;
@@ -197,7 +444,66 @@ impl Node {
             tracing::warn!(%sig, ?err, "transaction dropped at block production");
         }
 
-        let account_writes = output.account_writes;
+        // Merge SVM writes and pool writes into one account-write set, with
+        // pool processed on top of (seeded by) the SVM results.
+        let mut writes: HashMap<Pubkey, Option<zul_store::StoredAccount>> =
+            output.account_writes.iter().cloned().collect();
+        let mut included = output.included;
+        let mut pool_nullifiers: Vec<[u8; 32]> = Vec::new();
+
+        if !pool_txs.is_empty() {
+            let seed: HashMap<Pubkey, u64> = writes
+                .iter()
+                .filter_map(|(pk, acc)| acc.as_ref().map(|a| (*pk, a.lamports)))
+                .collect();
+            let pool_instructions: Vec<(Pubkey, zul_privacy::PoolInstruction)> = pool_txs
+                .iter()
+                .map(|pt| (pt.fee_payer, pt.instruction.clone()))
+                .collect();
+            let pool_result =
+                self.pool
+                    .process_block_seeded(&self.store, &pool_instructions, &seed)?;
+
+            for (pubkey, pool_account) in pool_result.account_writes {
+                // The pool only moves lamports. If the SVM already wrote this
+                // account in the same block (e.g. a data change), keep the
+                // SVM's fields and take only the pool's lamports — otherwise
+                // the pool's view (built from pre-block committed state) would
+                // clobber the SVM's update.
+                let merged = match (writes.get(&pubkey), pool_account) {
+                    (Some(Some(svm_account)), Some(pool_account)) => {
+                        let mut acc = svm_account.clone();
+                        acc.lamports = pool_account.lamports;
+                        Some(acc)
+                    }
+                    (_, other) => other,
+                };
+                writes.insert(pubkey, merged);
+            }
+            pool_nullifiers = pool_result.nullifiers;
+
+            for (pt, status) in pool_txs.into_iter().zip(pool_result.statuses) {
+                let ok = status.is_ok();
+                let fee = if ok { pool::POOL_TX_FEE } else { 0 };
+                let post = pool::lamports_in_writes(
+                    &writes.iter().map(|(k, v)| (*k, v.clone())).collect::<Vec<_>>(),
+                    &pt.fee_payer,
+                )
+                .unwrap_or(0);
+                let meta = pool::pool_meta(ok, status.err(), fee, 0, post, vec![]);
+                included.push((pt.transaction, meta));
+            }
+        }
+
+        // Credit any queued L1 deposits into this block's writes (exactly once).
+        self.apply_deposits(&deposits, &mut writes)?;
+
+        // Bridge withdrawals: burn the L2 balance now; the withdrawal leaves go
+        // into the shallow withdrawals tree once the block commits (below).
+        let withdrawal_leaves = self.apply_withdraws(withdraw_txs, &mut writes, &mut included);
+
+        let account_writes: Vec<(Pubkey, Option<zul_store::StoredAccount>)> =
+            writes.into_iter().collect();
         let leaf_updates: Vec<LeafUpdate> = account_writes
             .iter()
             .map(|(pubkey, account)| (*pubkey, account.as_ref().map(|a| a.hash(pubkey))))
@@ -205,7 +511,7 @@ impl Node {
         let state_update = self.store.prepare_state_update(&leaf_updates)?;
 
         let (transactions, metas): (Vec<VersionedTransaction>, Vec<_>) =
-            output.included.into_iter().unzip();
+            included.into_iter().unzip();
         let header = BlockHeader {
             slot,
             parent_hash,
@@ -219,17 +525,38 @@ impl Node {
 
         let mut queue = tip.queue.clone();
         queue.register(slot, blockhash);
-        self.store
-            .commit_block(&block, &metas, &account_writes, &state_update, &queue, &[])?;
+        self.store.commit_block(
+            &block,
+            &metas,
+            &account_writes,
+            &state_update,
+            &queue,
+            &pool_nullifiers,
+        )?;
 
         tip.queue = queue;
         tip.slot = slot;
         tip.blockhash = blockhash;
         tip.last_block_unix_ms = timestamp_ms;
 
+        // Insert committed withdrawal leaves into the shallow withdrawals tree
+        // and publish its root for the batcher to post to L1.
+        if !withdrawal_leaves.is_empty() {
+            let mut tree = self.withdrawals.lock().unwrap();
+            for (leaf_pubkey, account_hash) in &withdrawal_leaves {
+                crate::withdraw_smt::apply(&mut tree, leaf_pubkey, account_hash);
+            }
+            let root = crate::withdraw_smt::root(&tree);
+            drop(tree);
+            if let Err(e) = self.store.set_withdrawals_root(&root) {
+                tracing::error!(error = %e, "failed to persist withdrawals root");
+            }
+        }
+
         self.total_txs
             .fetch_add(block.header.transaction_count as u64, Ordering::Relaxed);
 
+        // Notify WebSocket subscribers (skip the work if nobody is listening).
         if self.notifier.receiver_count() > 0 {
             let signatures = block
                 .transactions
@@ -307,6 +634,9 @@ impl RpcBackend for Node {
         if self.draining.load(Ordering::Relaxed) {
             return false;
         }
+        // Empty load still produces a heartbeat block, so a gap of several
+        // heartbeats means the producer is stuck. Floor at 30s for tiny
+        // heartbeat configs.
         let limit = (self.options.heartbeat.as_millis() as u64)
             .saturating_mul(3)
             .max(30_000);
@@ -319,12 +649,12 @@ impl RpcBackend for Node {
 
     fn withdrawal_proof(
         &self,
-        _recipient: &[u8; 32],
-        _amount: u64,
-        _nonce: u64,
+        recipient: &[u8; 32],
+        amount: u64,
+        nonce: u64,
     ) -> Result<(H256, zul_store::SmtProof), String> {
-        // Bridge withdrawals are not wired up yet.
-        Err("withdrawal proofs not available".into())
+        self.compute_withdrawal_proof(recipient, amount, nonce)
+            .map_err(|e| e.to_string())
     }
 
     async fn submit_transaction(
@@ -352,6 +682,7 @@ impl RpcBackend for Node {
         &self,
         tx: VersionedTransaction,
     ) -> Result<SimulationResult, BackendError> {
+        // Execute against committed state and discard everything.
         let (slot, parent, queue) = {
             let tip = self.tip.read().unwrap();
             (tip.slot + 1, tip.blockhash, tip.queue.clone())
@@ -425,6 +756,7 @@ mod tests {
         _dir: tempfile::TempDir,
         node: Node,
         payer: Keypair,
+        fee_collector: Pubkey,
     }
 
     fn setup() -> Harness {
@@ -433,11 +765,12 @@ mod tests {
         let sequencer = Keypair::new();
         let faucet = Keypair::new();
         let payer = Keypair::new();
+        let fee_collector = Pubkey::new_unique();
         let genesis = GenesisConfig {
             chain_name: "zul-node-test".into(),
             creation_time_ms: 1_760_000_000_000,
             sequencer: sequencer.pubkey(),
-            fee_collector: Pubkey::new_unique(),
+            fee_collector,
             allocations: vec![
                 Allocation {
                     pubkey: faucet.pubkey(),
@@ -453,6 +786,7 @@ mod tests {
             store,
             &genesis,
             sequencer,
+            vec![],
             NodeOptions {
                 faucet: Some(faucet),
                 heartbeat: Duration::from_secs(3600),
@@ -464,6 +798,7 @@ mod tests {
             _dir: dir,
             node,
             payer,
+            fee_collector,
         }
     }
 
@@ -485,16 +820,27 @@ mod tests {
 
         let tx = transfer(&h.payer, &recipient, ZUL, blockhash);
         let sig = h.node.submit_transaction(tx).await.unwrap();
+
+        // No block yet (loop hasn't ticked).
         assert_eq!(h.node.current_slot(), 0);
 
         let slot = h.node.try_produce_block().unwrap().expect("block");
         assert_eq!(slot, 1);
+        assert_eq!(h.node.current_slot(), 1);
 
+        // The transaction is queryable with success status.
         let (loc, _, meta) = h.node.store().get_transaction(&sig).unwrap().unwrap();
         assert_eq!(loc.slot, 1);
         assert!(meta.status.is_ok());
+
         let recipient_account = h.node.store().get_account(&recipient).unwrap().unwrap();
         assert_eq!(recipient_account.lamports, ZUL);
+
+        // New blockhash registered and valid; old genesis hash still valid.
+        let (tip_slot, tip_hash) = h.node.latest_blockhash();
+        assert_eq!(tip_slot, 1);
+        assert!(h.node.is_blockhash_valid(&tip_hash));
+        assert!(h.node.is_blockhash_valid(&blockhash));
     }
 
     #[tokio::test]
@@ -505,14 +851,313 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn l1_deposit_credits_recipient_exactly_once() {
+        let h = setup();
+        let recipient = Pubkey::new_unique();
+        let deposit = DepositEvent {
+            l1_signature: "depositSig1".into(),
+            mint: None,
+            amount: 7 * ZUL,
+            l2_recipient: recipient,
+        };
+
+        // A queued deposit produces a block (even with an empty mempool) and
+        // credits the recipient; a receipt account marks it processed.
+        h.node.enqueue_deposits(vec![deposit.clone()]);
+        h.node.try_produce_block().unwrap().expect("block");
+        assert_eq!(
+            h.node.store().get_account(&recipient).unwrap().unwrap().lamports,
+            7 * ZUL
+        );
+        let receipt = crate::bridge::deposit_receipt_address("depositSig1");
+        assert!(h.node.store().get_account(&receipt).unwrap().is_some());
+
+        // Re-enqueuing the same deposit must not double-credit.
+        h.node.enqueue_deposits(vec![deposit]);
+        h.node.try_produce_block().unwrap();
+        assert_eq!(
+            h.node.store().get_account(&recipient).unwrap().unwrap().lamports,
+            7 * ZUL
+        );
+    }
+
+    #[tokio::test]
+    async fn withdrawal_burns_and_produces_a_claimable_proof() {
+        use solana_sdk::instruction::{AccountMeta, Instruction};
+        use solana_sdk::message::Message;
+
+        let h = setup();
+        let (_, blockhash) = h.node.latest_blockhash();
+        let recipient = [9u8; 32];
+        let (amount, nonce) = (3 * ZUL, 1u64);
+
+        // A withdraw tx: single instruction to the bridge-withdraw program,
+        // data = recipient(32) || amount(8) || nonce(8).
+        let mut data = Vec::new();
+        data.extend_from_slice(&recipient);
+        data.extend_from_slice(&amount.to_le_bytes());
+        data.extend_from_slice(&nonce.to_le_bytes());
+        let ix = Instruction {
+            program_id: crate::bridge::BRIDGE_WITHDRAW_PROGRAM_ID,
+            accounts: vec![AccountMeta::new(h.payer.pubkey(), true)],
+            data,
+        };
+        let tx = VersionedTransaction::from(solana_sdk::transaction::Transaction::new(
+            &[&h.payer],
+            Message::new(&[ix], Some(&h.payer.pubkey())),
+            Hash::new_from_array(blockhash),
+        ));
+        h.node.submit_transaction(tx).await.unwrap();
+        h.node.try_produce_block().unwrap().expect("block");
+
+        // Withdrawer burned amount + fee; collector got the fee.
+        let payer_bal = h.node.store().get_account(&h.payer.pubkey()).unwrap().unwrap().lamports;
+        assert_eq!(payer_bal, 100 * ZUL - amount - pool::POOL_TX_FEE);
+        assert_eq!(
+            h.node.store().get_account(&h.fee_collector).unwrap().unwrap().lamports,
+            pool::POOL_TX_FEE
+        );
+
+        // The node produces a settlement-valid inclusion proof for the
+        // withdrawal commitment against the shallow withdrawals-tree root.
+        let (root, proof) = h.node.compute_withdrawal_proof(&recipient, amount, nonce).unwrap();
+        assert_eq!(root, h.node.store().withdrawals_root().unwrap());
+        let leaf = crate::bridge::withdrawal_pubkey(&recipient, nonce);
+        let account_hash = crate::bridge::withdrawal_account_hash(&recipient, amount, nonce);
+        assert!(crate::withdraw_smt::verify(&root, &leaf, &account_hash, &proof));
+
+        // A different (amount, nonce) is absent — no false proof.
+        assert!(h.node.compute_withdrawal_proof(&recipient, amount, 999).is_err());
+    }
+
+    #[tokio::test]
     async fn airdrop_funds_account_via_real_transfer() {
         let h = setup();
         let target = Pubkey::new_unique();
         let sig = h.node.request_airdrop(target, 2 * ZUL).await.unwrap();
         h.node.try_produce_block().unwrap().expect("block");
+
         let account = h.node.store().get_account(&target).unwrap().unwrap();
         assert_eq!(account.lamports, 2 * ZUL);
         let (_, _, meta) = h.node.store().get_transaction(&sig).unwrap().unwrap();
         assert!(meta.status.is_ok());
+
+        // Limit enforced.
+        let too_much = h
+            .node
+            .request_airdrop(target, h.node.options.faucet_max_lamports + 1)
+            .await;
+        assert!(matches!(too_much, Err(BackendError::FaucetLimit)));
+    }
+
+    #[tokio::test]
+    async fn stale_blockhash_rejected_at_submission() {
+        let h = setup();
+        let tx = transfer(&h.payer, &Pubkey::new_unique(), 1, [9u8; 32]);
+        let err = h.node.submit_transaction(tx).await.unwrap_err();
+        assert!(matches!(err, BackendError::Rejected(_)));
+    }
+
+    #[tokio::test]
+    async fn simulation_does_not_commit_state() {
+        let h = setup();
+        let recipient = Pubkey::new_unique();
+        let (_, blockhash) = h.node.latest_blockhash();
+        let tx = transfer(&h.payer, &recipient, ZUL, blockhash);
+
+        let result = h.node.simulate_transaction(tx).await.unwrap();
+        assert!(result.err.is_none());
+        assert!(result.units_consumed > 0);
+        // Nothing persisted.
+        assert_eq!(h.node.current_slot(), 0);
+        assert!(h.node.store().get_account(&recipient).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn shield_transaction_flows_through_block_production() {
+        use zul_privacy::{
+            field::fr_to_bytes,
+            instruction::{Asset, PoolInstruction},
+            poseidon::{hash1, note_secret},
+            POOL_PROGRAM_ID, POOL_STATE_ADDRESS, POOL_VAULT_ADDRESS,
+        };
+        use solana_sdk::instruction::{AccountMeta, Instruction};
+        use solana_sdk::message::Message;
+
+        let h = setup();
+        let (_, blockhash) = h.node.latest_blockhash();
+        let amount = 5 * ZUL;
+
+        // Build a shield instruction (no proof needed for shield); the node
+        // binds the amount to the commitment from the opaque secret.
+        let pk = hash1(ark_bn254::Fr::from(1u64));
+        let secret = fr_to_bytes(&note_secret(pk, ark_bn254::Fr::from(123u64)));
+        let ix_data = PoolInstruction::Shield {
+            asset: Asset::Native,
+            amount,
+            secret,
+            encrypted_note: vec![0xab; 32],
+        }
+        .to_bytes();
+        let ix = Instruction {
+            program_id: POOL_PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(h.payer.pubkey(), true),
+                AccountMeta::new(POOL_STATE_ADDRESS, false),
+                AccountMeta::new(POOL_VAULT_ADDRESS, false),
+            ],
+            data: ix_data,
+        };
+        let message = Message::new(&[ix], Some(&h.payer.pubkey()));
+        let tx = solana_sdk::transaction::Transaction::new(
+            &[&h.payer],
+            message,
+            Hash::new_from_array(blockhash),
+        );
+
+        let sig = h
+            .node
+            .submit_transaction(VersionedTransaction::from(tx))
+            .await
+            .unwrap();
+        h.node.try_produce_block().unwrap().expect("block");
+
+        // The shield is recorded and succeeded.
+        let (_, _, meta) = h.node.store().get_transaction(&sig).unwrap().unwrap();
+        assert!(meta.status.is_ok(), "shield meta: {:?}", meta);
+
+        // Vault funded, payer debited amount + fee.
+        let vault = h.node.store().get_account(&POOL_VAULT_ADDRESS).unwrap().unwrap();
+        assert_eq!(vault.lamports, amount);
+        let payer = h.node.store().get_account(&h.payer.pubkey()).unwrap().unwrap();
+        assert_eq!(
+            payer.lamports,
+            100 * ZUL - amount - pool::POOL_TX_FEE
+        );
+
+        // Pool state grew by one commitment.
+        let state = zul_privacy::PoolState::from_bytes(
+            &h.node.store().get_account(&POOL_STATE_ADDRESS).unwrap().unwrap().data,
+        )
+        .unwrap();
+        assert_eq!(state.next_leaf_index, 1);
+    }
+
+    #[tokio::test]
+    async fn regular_and_pool_txs_compose_in_one_block() {
+        use zul_privacy::{
+            field::fr_to_bytes,
+            instruction::{Asset, PoolInstruction},
+            poseidon::{hash1, note_secret},
+            POOL_PROGRAM_ID, POOL_STATE_ADDRESS, POOL_VAULT_ADDRESS,
+        };
+        use solana_sdk::instruction::{AccountMeta, Instruction};
+        use solana_sdk::message::Message;
+
+        let h = setup();
+        let (_, blockhash) = h.node.latest_blockhash();
+        let recipient = Pubkey::new_unique();
+        let shield_amount = 4 * ZUL;
+        let transfer_amount = 3 * ZUL;
+
+        // Regular SVM transfer payer -> recipient.
+        let transfer = transfer(&h.payer, &recipient, transfer_amount, blockhash);
+        h.node.submit_transaction(transfer).await.unwrap();
+
+        // Pool shield from the same payer.
+        let pk = hash1(ark_bn254::Fr::from(1u64));
+        let secret = fr_to_bytes(&note_secret(pk, ark_bn254::Fr::from(99u64)));
+        let shield = PoolInstruction::Shield {
+            asset: Asset::Native,
+            amount: shield_amount,
+            secret,
+            encrypted_note: vec![],
+        }
+        .to_bytes();
+        let ix = Instruction {
+            program_id: POOL_PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(h.payer.pubkey(), true),
+                AccountMeta::new(POOL_STATE_ADDRESS, false),
+                AccountMeta::new(POOL_VAULT_ADDRESS, false),
+            ],
+            data: shield,
+        };
+        let shield_tx = solana_sdk::transaction::Transaction::new(
+            &[&h.payer],
+            Message::new(&[ix], Some(&h.payer.pubkey())),
+            Hash::new_from_array(blockhash),
+        );
+        h.node
+            .submit_transaction(VersionedTransaction::from(shield_tx))
+            .await
+            .unwrap();
+
+        // One block holds both.
+        h.node.try_produce_block().unwrap().expect("block");
+
+        let fee = zul_primitives::constants::LAMPORTS_PER_SIGNATURE;
+        // Payer paid: transfer amount + its SVM fee + shield amount + pool fee.
+        let payer_bal = h.node.store().get_account(&h.payer.pubkey()).unwrap().unwrap().lamports;
+        assert_eq!(
+            payer_bal,
+            100 * ZUL - transfer_amount - fee - shield_amount - pool::POOL_TX_FEE
+        );
+        // Regular recipient got the transfer.
+        let recipient_bal = h.node.store().get_account(&recipient).unwrap().unwrap().lamports;
+        assert_eq!(recipient_bal, transfer_amount);
+        // Vault holds the shielded amount.
+        let vault_bal = h.node.store().get_account(&POOL_VAULT_ADDRESS).unwrap().unwrap().lamports;
+        assert_eq!(vault_bal, shield_amount);
+        // Collector accumulated BOTH fees (SVM seed + pool fee).
+        let collector_bal = h.node.store().get_account(&h.fee_collector).unwrap().unwrap().lamports;
+        assert_eq!(collector_bal, fee + pool::POOL_TX_FEE);
+    }
+
+    #[tokio::test]
+    async fn node_restarts_with_persisted_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let sequencer = Keypair::new();
+        let faucet = Keypair::new();
+        let genesis = GenesisConfig {
+            chain_name: "zul-restart-test".into(),
+            creation_time_ms: 1_760_000_000_000,
+            sequencer: sequencer.pubkey(),
+            fee_collector: Pubkey::new_unique(),
+            allocations: vec![Allocation {
+                pubkey: faucet.pubkey(),
+                lamports: 1_000 * ZUL,
+            }],
+        };
+
+        let target = Pubkey::new_unique();
+        {
+            let store = Arc::new(Store::open(&dir.path().join("zul.redb")).unwrap());
+            let node = Node::new(
+                store,
+                &genesis,
+                sequencer.insecure_clone(),
+                vec![],
+                NodeOptions {
+                    faucet: Some(faucet.insecure_clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            node.request_airdrop(target, ZUL).await.unwrap();
+            node.try_produce_block().unwrap().expect("block");
+            assert_eq!(node.current_slot(), 1);
+        }
+
+        // Reopen: tip, queue, and state survive.
+        let store = Arc::new(Store::open(&dir.path().join("zul.redb")).unwrap());
+        let node = Node::new(store, &genesis, sequencer, vec![], NodeOptions::default()).unwrap();
+        assert_eq!(node.current_slot(), 1);
+        assert_eq!(
+            node.store().get_account(&target).unwrap().unwrap().lamports,
+            ZUL
+        );
+        let (_, tip_hash) = node.latest_blockhash();
+        assert!(node.is_blockhash_valid(&tip_hash));
     }
 }

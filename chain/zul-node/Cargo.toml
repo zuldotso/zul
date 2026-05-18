@@ -8,11 +8,25 @@ license.workspace = true
 name = "zul-node"
 path = "src/main.rs"
 
+[[bin]]
+name = "zul-recover"
+path = "src/bin/zul-recover.rs"
+
+[[bin]]
+name = "zul-l1-deposit"
+path = "src/bin/zul-l1-deposit.rs"
+
+[[bin]]
+name = "zul-l1-claim"
+path = "src/bin/zul-l1-claim.rs"
+
 [dependencies]
 zul-primitives = { workspace = true }
 zul-store = { workspace = true }
 zul-executor = { workspace = true }
+zul-privacy = { workspace = true }
 zul-rpc = { workspace = true }
+zul-bridge = { workspace = true }
 solana-sdk = { workspace = true }
 solana-system-interface = { workspace = true }
 tokio = { workspace = true }
@@ -25,6 +39,8 @@ bs58 = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tiny_http = "0.12"
+ureq = "2"
 
 [dev-dependencies]
 tempfile = "3"
+ark-bn254 = { workspace = true }
