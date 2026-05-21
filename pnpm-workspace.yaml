@@ -1,4 +1,5 @@
 packages:
   - db
+  - sdk
   - indexer
   - explorer
