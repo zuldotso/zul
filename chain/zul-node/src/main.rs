@@ -2,10 +2,14 @@
 //!
 //! Usage: `zul-node --config <path/to/node.toml>` (default ./config/node.toml).
 
+mod bridge;
 mod keys;
+mod l1;
 mod mempool;
 mod metrics;
 mod node;
+mod pool;
+mod withdraw_smt;
 
 use node::{Node, NodeOptions};
 use zul_primitives::{genesis::GenesisConfig, hash, NodeConfig};
@@ -13,8 +17,36 @@ use zul_store::Store;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Load the pool verifying keys from `<data_dir>/params/{transfer,unshield}.vk.bin`
+/// (copy them there from circuits/artifacts after building the circuits).
+fn load_pool_keys(data_dir: &std::path::Path) -> zul_privacy::VerifyingKeys {
+    let params = data_dir.join("params");
+    let transfer = params.join("transfer.vk.bin");
+    let unshield = params.join("unshield.vk.bin");
+    match (std::fs::read(&transfer), std::fs::read(&unshield)) {
+        (Ok(t), Ok(u)) => match zul_privacy::VerifyingKeys::load(&t, &u) {
+            Ok(keys) => {
+                tracing::info!("loaded shielded-pool verifying keys");
+                keys
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "invalid pool verifying keys; pool transfers disabled");
+                zul_privacy::VerifyingKeys::unconfigured()
+            }
+        },
+        _ => {
+            tracing::warn!(
+                "no pool verifying keys at {}; transfers/unshields disabled until provided",
+                params.display()
+            );
+            zul_privacy::VerifyingKeys::unconfigured()
+        }
+    }
+}
+
 /// Resolve when the process is asked to stop. Handles SIGINT (ctrl-c) on all
-/// platforms and SIGTERM on Unix — systemd sends SIGTERM on `restart`/`stop`.
+/// platforms and SIGTERM on Unix — systemd sends SIGTERM on `restart`/`stop`,
+/// so without this the graceful path never runs in production.
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
@@ -44,8 +76,10 @@ fn config_path() -> std::path::PathBuf {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Genesis bootstrap loads the SVM program runtime and walks the state SMT,
-    // which is stack-hungry. Run everything on an explicit large-stack thread.
+    // Genesis bootstrap loads the SVM program runtime and walks the
+    // depth-256 state SMT, which is stack-hungry. The OS default main-thread
+    // stack (1 MB on Windows, 8 MB on Linux) can overflow, so run everything
+    // on an explicit large-stack thread and give tokio workers the same.
     const STACK: usize = 32 * 1024 * 1024;
     std::thread::Builder::new()
         .name("zul-node".into())
@@ -90,6 +124,11 @@ async fn run() -> anyhow::Result<()> {
         None
     };
 
+    // Shielded-pool verifying keys: load from the circuit artifacts if
+    // present, otherwise stay unconfigured (transfers/unshields rejected;
+    // shields still work). Path defaults to ./params next to the binary.
+    let pool_verifying_keys = load_pool_keys(&config.node.data_dir);
+
     let store = Arc::new(Store::open(&config.node.data_dir.join("zul.redb"))?);
     let options = NodeOptions {
         slot_duration: Duration::from_millis(config.node.slot_duration_ms),
@@ -98,9 +137,34 @@ async fn run() -> anyhow::Result<()> {
         max_per_payer: config.node.max_per_payer,
         faucet,
         faucet_max_lamports: config.rpc.faucet_max_lamports,
+        pool_verifying_keys,
         ..Default::default()
     };
-    let node = Arc::new(Node::new(store.clone(), &genesis, sequencer, options)?);
+    let node = Arc::new(Node::new(store.clone(), &genesis, sequencer, vec![], options)?);
+
+    // Shared L1 metrics, written by the batcher thread and read by /metrics.
+    let l1_metrics = Arc::new(metrics::L1Metrics::new());
+
+    // L1 settlement batcher (Tier 3): when enabled, post batches of L2 blocks
+    // to the devnet settlement/DA programs on a dedicated thread.
+    let _batcher = if config.l1.enabled {
+        Some(l1::spawn(
+            store.clone(),
+            config.l1.clone(),
+            config.node.slot_duration_ms,
+            l1_metrics.clone(),
+        )?)
+    } else {
+        tracing::info!("L1 settlement disabled (l1.enabled = false)");
+        None
+    };
+
+    // L1 -> L2 deposit watcher: credits SOL deposited into the L1 vault.
+    let _deposit_watcher = if config.l1.enabled {
+        Some(bridge::spawn(node.clone(), config.l1.clone())?)
+    } else {
+        None
+    };
 
     // JSON-RPC: HTTP on the main port, WebSocket subscriptions on port+1.
     let rpc = zul_rpc::serve(
@@ -111,10 +175,6 @@ async fn run() -> anyhow::Result<()> {
     )
     .await?;
     tracing::info!(http = %rpc.http_addr, ws = %rpc.ws_addr, "RPC listening");
-
-    // Shared L1 metrics; the settlement batcher will write these once L1 is
-    // wired up. For now they stay at zero.
-    let l1_metrics = Arc::new(metrics::L1Metrics::new());
 
     // Prometheus /metrics + /health, when configured (bind localhost).
     if let Some(metrics_addr) = config.rpc.metrics_addr {
@@ -137,6 +197,7 @@ async fn run() -> anyhow::Result<()> {
                     _ = shutdown.notified() => break,
                 }
                 let node = node.clone();
+                // Block production is synchronous store/SVM work.
                 let result =
                     tokio::task::spawn_blocking(move || node.try_produce_block()).await;
                 match result {
@@ -149,6 +210,8 @@ async fn run() -> anyhow::Result<()> {
     };
 
     shutdown_signal().await;
+    // Graceful: flip health to draining (load balancers stop routing), let the
+    // current block finish, then stop the RPC server.
     tracing::info!("draining for shutdown");
     node.begin_draining();
     shutdown.notify_one();
