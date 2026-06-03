@@ -1,0 +1,28 @@
+# Zul sequencer node — systemd unit.
+# Install: sudo cp deploy/zul-node.service /etc/systemd/system/
+#          (edit User / paths below to match your checkout)
+#          sudo systemctl daemon-reload && sudo systemctl enable --now zul-node
+# Logs:    journalctl -u zul-node -f
+
+[Unit]
+Description=Zul privacy Layer 2 sequencer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zul
+WorkingDirectory=/home/zul/ZUL
+ExecStart=/home/zul/ZUL/chain/target/release/zul-node --config /home/zul/ZUL/config/node.toml
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+# The sequencer is the single writer; give it generous file handles.
+LimitNOFILE=1000000
+# Light hardening.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target
