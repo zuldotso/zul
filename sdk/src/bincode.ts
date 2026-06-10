@@ -1,5 +1,5 @@
 // Minimal bincode (v1, default config: little-endian, fixint, u32 enum
-// variants) encoder/decoder ??just enough to mirror the Rust
+// variants) encoder/decoder — just enough to mirror the Rust
 // `PoolInstruction` wire format in chain/zul-privacy/src/instruction.rs.
 
 export class BincodeWriter {
@@ -14,7 +14,7 @@ export class BincodeWriter {
 
   u64(value: bigint): this {
     const b = new Uint8Array(8);
-    new DataView(b.buffer).setBigUint64(0, BigInt(value), false);
+    new DataView(b.buffer).setBigUint64(0, BigInt(value), true);
     this.chunks.push(b);
     return this;
   }
