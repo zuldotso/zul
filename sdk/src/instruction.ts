@@ -26,7 +26,7 @@ function writeAsset(w: BincodeWriter, asset: Asset): void {
   if (asset.kind === "native") {
     w.u32(0);
   } else {
-    w.u32(2).fixedBytes(asset.mint, 32);
+    w.u32(1).fixedBytes(asset.mint, 32);
   }
 }
 
