@@ -6,7 +6,7 @@ import { treeNode } from "./poseidon.js";
 
 export const TREE_DEPTH = 26;
 // Must equal zero_hashes()[0] in state.rs.
-export const EMPTY_LEAF = 770212417220141185n;
+export const EMPTY_LEAF = 770212417220141184n;
 
 export class MerkleTree {
   private zeros: bigint[] = [];
