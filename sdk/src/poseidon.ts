@@ -70,7 +70,7 @@ export async function nullifier(
   leafIndex: bigint,
   spendingKey: bigint,
 ): Promise<bigint> {
-  return hash([commitment, spendingKey, leafIndex]);
+  return hash([commitment, leafIndex, spendingKey]);
 }
 
 export async function treeNode(left: bigint, right: bigint): Promise<bigint> {
