@@ -13,7 +13,7 @@ export const POOL_PROGRAM_ID = new PublicKey(
   ]),
 );
 
-export const LAMPORTS_PER_ZUL = 100_000_000n;
+export const LAMPORTS_PER_ZUL = 1_000_000_000n;
 
 export function connect(
   endpoint: string,
