@@ -29,11 +29,11 @@ export function frFromBytes(bytes: FieldBytes): bigint {
 /// 32-byte big-endian (for Groth16 point coordinates).
 export function frToBytesBE(value: bigint): Uint8Array {
   const le = frToBytes(value);
-  return le;
+  return le.reverse();
 }
 
 export function randomFr(): bigint {
-  // 64 bytes of entropy reduced mod p ??negligible bias.
+  // 64 bytes of entropy reduced mod p — negligible bias.
   const buf = new Uint8Array(64);
   globalThis.crypto.getRandomValues(buf);
   let v = 0n;
