@@ -1,4 +1,18 @@
-# Zul — Privacy Layer 2 on Solana
+<div align="center">
+
+<img src="banner.png" alt="Zul — Privacy Layer 2 on Solana" width="720" />
+
+<p><strong>Privacy Layer 2 on Solana</strong> — real SVM execution, a native <code>ZUL</code> gas token, and a multi-asset zk shielded pool.</p>
+
+<p>
+  <a href="https://zul.so"><b>zul.so</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://x.com/zuldotso"><b>@zuldotso</b></a>
+</p>
+
+</div>
+
+---
 
 A real Layer 2 chain that settles to Solana: own block production (single PoA
 sequencer), real SVM execution via Agave's `solana-svm`, native gas token `ZUL`,
