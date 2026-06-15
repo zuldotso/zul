@@ -15,10 +15,13 @@ cpi = ["no-entrypoint"]
 no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
-idl-build = ["anchor-lang/idl-build"]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 
 [dependencies]
-anchor-lang = "0.31.1"
+# `init-if-needed` so the bridge can lazily create vault / recipient ATAs the
+# first time a given SPL mint is deposited or withdrawn.
+anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }
+anchor-spl = "0.31.1"
 # Pure-Rust blake3 (portable, no SIMD/asm) so the program hashes without the
 # `sol_blake3` syscall, which devnet's loader does not resolve at deploy time.
 blake3 = { version = "1", default-features = false }

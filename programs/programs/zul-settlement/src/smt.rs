@@ -121,10 +121,16 @@ pub fn verify(root: &H256, pubkey: &[u8; 32], account_hash: &H256, proof: &SmtPr
 const WITHDRAW_DOMAIN: &[u8] = b"PL2:bridge:withdraw:v1";
 const WITHDRAW_ADDR_DOMAIN: &[u8] = b"PL2:bridge:withdraw-addr:v1";
 
-pub fn withdrawal_account_hash(recipient: &[u8; 32], amount: u64, nonce: u64) -> H256 {
+pub fn withdrawal_account_hash(
+    recipient: &[u8; 32],
+    asset_id: &[u8; 32],
+    amount: u64,
+    nonce: u64,
+) -> H256 {
     hashv(&[
         WITHDRAW_DOMAIN,
         recipient,
+        asset_id,
         &amount.to_le_bytes(),
         &nonce.to_le_bytes(),
     ])
@@ -182,10 +188,13 @@ mod tests {
     #[test]
     fn withdrawal_hash_binds_all_fields() {
         let r = [1u8; 32];
-        let base = withdrawal_account_hash(&r, 100, 0);
-        assert_ne!(base, withdrawal_account_hash(&r, 101, 0));
-        assert_ne!(base, withdrawal_account_hash(&r, 100, 1));
-        assert_ne!(base, withdrawal_account_hash(&[2u8; 32], 100, 0));
+        let native = [0u8; 32];
+        let base = withdrawal_account_hash(&r, &native, 100, 0);
+        assert_ne!(base, withdrawal_account_hash(&r, &native, 101, 0));
+        assert_ne!(base, withdrawal_account_hash(&r, &native, 100, 1));
+        assert_ne!(base, withdrawal_account_hash(&[2u8; 32], &native, 100, 0));
+        // The asset id is bound: a different mint yields a different commitment.
+        assert_ne!(base, withdrawal_account_hash(&r, &[9u8; 32], 100, 0));
     }
 
     // Cross-pinned with chain/zul-node/src/bridge.rs: the L2 computes these
@@ -195,9 +204,10 @@ mod tests {
     #[test]
     fn withdrawal_hashes_match_l2() {
         let recipient = [7u8; 32];
+        // Native asset id ([0u8;32]); SPL withdrawals bind the L1 mint instead.
         assert_eq!(
-            withdrawal_account_hash(&recipient, 1000, 5),
-            hex32("6925634e356b691780b4a731d5faad074613a8502daf904911ee18d143c120c7")
+            withdrawal_account_hash(&recipient, &[0u8; 32], 1000, 5),
+            hex32("29002aa04988b6423f4ac5f5ba397f68a7a49dbc6eb0c985fe9dbf72301c6729")
         );
         assert_eq!(
             withdrawal_pubkey(&recipient, 5),

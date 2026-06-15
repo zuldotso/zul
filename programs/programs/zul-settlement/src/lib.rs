@@ -9,6 +9,10 @@
 //! challenged on-chain by re-execution; the challenge window is procedural.
 
 use anchor_lang::prelude::*;
+use anchor_spl::associated_token::AssociatedToken;
+use anchor_spl::token_interface::{
+    self, Mint, TokenAccount, TokenInterface, TransferChecked,
+};
 
 pub mod smt;
 
@@ -106,6 +110,106 @@ pub mod zul_settlement {
             depositor: ctx.accounts.depositor.key(),
             amount,
             l2_recipient,
+            mint: None,
+            decimals: 9,
+        });
+        Ok(())
+    }
+
+    /// Deposit `amount` of an SPL token into the bridge's per-mint vault ATA,
+    /// crediting `l2_recipient` with the wrapped token on the L2. The L2 mints a
+    /// deterministic wrapped representation of `mint` (the deposit watcher reads
+    /// the `Deposited` event's `mint` + `decimals`). Works for both Token and
+    /// Token-2022 mints via the token interface.
+    pub fn deposit_spl(ctx: Context<DepositSpl>, amount: u64, l2_recipient: Pubkey) -> Result<()> {
+        require!(amount > 0, SettlementError::ZeroAmount);
+
+        let decimals = ctx.accounts.mint.decimals;
+        token_interface::transfer_checked(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                TransferChecked {
+                    from: ctx.accounts.depositor_token_account.to_account_info(),
+                    mint: ctx.accounts.mint.to_account_info(),
+                    to: ctx.accounts.vault_token_account.to_account_info(),
+                    authority: ctx.accounts.depositor.to_account_info(),
+                },
+            ),
+            amount,
+            decimals,
+        )?;
+
+        emit!(Deposited {
+            depositor: ctx.accounts.depositor.key(),
+            amount,
+            l2_recipient,
+            mint: Some(ctx.accounts.mint.key()),
+            decimals,
+        });
+        Ok(())
+    }
+
+    /// Claim an SPL withdrawal: prove the asset-bound commitment is in a posted
+    /// batch's withdrawals root, then release the tokens from the per-mint vault
+    /// ATA to the recipient. The `claim` PDA prevents double claims.
+    pub fn claim_withdrawal_spl(
+        ctx: Context<ClaimWithdrawalSpl>,
+        _batch_no: u64,
+        amount: u64,
+        nonce: u64,
+        bitmap: [u8; 32],
+        siblings: Vec<[u8; 32]>,
+    ) -> Result<()> {
+        require!(amount > 0, SettlementError::ZeroAmount);
+
+        let recipient = ctx.accounts.recipient.key().to_bytes();
+        // SPL withdrawals bind the L1 mint as the asset id.
+        let asset_id = ctx.accounts.mint.key().to_bytes();
+        let leaf_pubkey = smt::withdrawal_pubkey(&recipient, nonce);
+        let account_hash = smt::withdrawal_account_hash(&recipient, &asset_id, amount, nonce);
+        let proof = smt::SmtProof {
+            bitmap,
+            siblings: &siblings,
+        };
+        require!(
+            smt::verify(
+                &ctx.accounts.batch.withdrawals_root,
+                &leaf_pubkey,
+                &account_hash,
+                &proof,
+            ),
+            SettlementError::InvalidProof
+        );
+
+        let decimals = ctx.accounts.mint.decimals;
+        let vault_bump = ctx.accounts.config.vault_bump;
+        let seeds: &[&[u8]] = &[VAULT_SEED, &[vault_bump]];
+        let signer = &[seeds];
+        token_interface::transfer_checked(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                TransferChecked {
+                    from: ctx.accounts.vault_token_account.to_account_info(),
+                    mint: ctx.accounts.mint.to_account_info(),
+                    to: ctx.accounts.recipient_token_account.to_account_info(),
+                    authority: ctx.accounts.vault.to_account_info(),
+                },
+                signer,
+            ),
+            amount,
+            decimals,
+        )?;
+
+        let claim = &mut ctx.accounts.claim;
+        claim.recipient = ctx.accounts.recipient.key();
+        claim.amount = amount;
+        claim.nonce = nonce;
+        claim.claimed_at = Clock::get()?.unix_timestamp;
+
+        emit!(Withdrawn {
+            recipient: ctx.accounts.recipient.key(),
+            amount,
+            nonce,
         });
         Ok(())
     }
@@ -124,7 +228,9 @@ pub mod zul_settlement {
 
         let recipient = ctx.accounts.recipient.key().to_bytes();
         let leaf_pubkey = smt::withdrawal_pubkey(&recipient, nonce);
-        let account_hash = smt::withdrawal_account_hash(&recipient, amount, nonce);
+        // Native ZUL/SOL withdrawal: asset id is the reserved all-zero value.
+        // SPL withdrawals are claimed via `claim_withdrawal_spl`.
+        let account_hash = smt::withdrawal_account_hash(&recipient, &[0u8; 32], amount, nonce);
         let proof = smt::SmtProof {
             bitmap,
             siblings: &siblings,
@@ -223,6 +329,76 @@ pub struct DepositSol<'info> {
 }
 
 #[derive(Accounts)]
+pub struct DepositSpl<'info> {
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    /// CHECK: the vault PDA is only the ATA authority here; it holds no data.
+    #[account(seeds = [VAULT_SEED], bump = config.vault_bump)]
+    pub vault: UncheckedAccount<'info>,
+    pub mint: InterfaceAccount<'info, Mint>,
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = depositor,
+    )]
+    pub depositor_token_account: InterfaceAccount<'info, TokenAccount>,
+    /// Per-mint vault ATA, created the first time this mint is bridged.
+    #[account(
+        init_if_needed,
+        payer = depositor,
+        associated_token::mint = mint,
+        associated_token::authority = vault,
+    )]
+    pub vault_token_account: InterfaceAccount<'info, TokenAccount>,
+    #[account(mut)]
+    pub depositor: Signer<'info>,
+    pub token_program: Interface<'info, TokenInterface>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(batch_no: u64, amount: u64, nonce: u64)]
+pub struct ClaimWithdrawalSpl<'info> {
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    #[account(seeds = [BATCH_SEED, &batch_no.to_le_bytes()], bump)]
+    pub batch: Account<'info, Batch>,
+    /// CHECK: vault PDA; signs the token transfer as the ATA authority.
+    #[account(seeds = [VAULT_SEED], bump = config.vault_bump)]
+    pub vault: UncheckedAccount<'info>,
+    pub mint: InterfaceAccount<'info, Mint>,
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = vault,
+    )]
+    pub vault_token_account: InterfaceAccount<'info, TokenAccount>,
+    /// CHECK: token destination owner; bound into the proof, so any submitter is fine.
+    pub recipient: UncheckedAccount<'info>,
+    #[account(
+        init_if_needed,
+        payer = payer,
+        associated_token::mint = mint,
+        associated_token::authority = recipient,
+    )]
+    pub recipient_token_account: InterfaceAccount<'info, TokenAccount>,
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + WithdrawalClaim::SIZE,
+        seeds = [CLAIM_SEED, recipient.key().as_ref(), &nonce.to_le_bytes()],
+        bump
+    )]
+    pub claim: Account<'info, WithdrawalClaim>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub token_program: Interface<'info, TokenInterface>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
 #[instruction(batch_no: u64, amount: u64, nonce: u64)]
 pub struct ClaimWithdrawal<'info> {
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
@@ -309,6 +485,10 @@ pub struct Deposited {
     pub depositor: Pubkey,
     pub amount: u64,
     pub l2_recipient: Pubkey,
+    /// None = native SOL; Some = the SPL mint deposited.
+    pub mint: Option<Pubkey>,
+    /// Token decimals (9 for native SOL/ZUL), so the L2 wrapped mint matches.
+    pub decimals: u8,
 }
 
 #[event]
