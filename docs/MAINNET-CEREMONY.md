@@ -5,6 +5,12 @@ mainnet. The dev keys (`circuits/scripts/setup.mjs`, fixed entropy, single
 contributor) are **forgeable** — anyone who knows the toxic waste can mint fake
 shielded value. This is the #1 launch blocker.
 
+> **Status (2026-06-16):** a first ceremony has been run and its output shipped
+> (`circuits/artifacts/CEREMONY-TRANSCRIPT.md`) — Hermez phase-1, one local
+> phase-2 contributor, Bitcoin-block beacon. That clears the forgeable dev keys.
+> For a multi-party guarantee, re-run the steps below with several independent
+> contributors and redeploy `vk.bin` before the pool holds large value.
+
 Security assumption: **at least one honest contributor** never reveals or stores
 their randomness. So run it with several unrelated participants on separate
 machines. Tooling: `circuits/scripts/ceremony.mjs`.

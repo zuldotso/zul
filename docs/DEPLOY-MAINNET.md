@@ -44,7 +44,10 @@ sudo cp deploy/zul-node@.service /etc/systemd/system/
 # edit User / WorkingDirectory in the unit to match the checkout
 sudo systemctl daemon-reload && sudo systemctl enable --now zul-node@mainnet
 journalctl -u zul-node@mainnet -f   # expect: network=mainnet … loading ZUL node
-sudo ufw allow 8899/tcp && sudo ufw allow 8900/tcp
+# Publish the RPC as https://rpc-mainnet.zul.so (8899/8900 stay on localhost).
+# Point DNS A record rpc-mainnet.zul.so -> this box first, then:
+sudo ufw allow 80,443/tcp                       # Caddy; do NOT open 8899/8900
+sudo cp deploy/Caddyfile.mainnet /etc/caddy/Caddyfile && sudo systemctl reload caddy
 ```
 
 The boot log prints `network=mainnet`; the config validator refuses to start if
@@ -94,20 +97,55 @@ batch_interval_slots = 600
 on first boot, then posts state roots + DA; the deposit watcher credits L2 from
 mainnet-beta deposits.
 
-## 5. Bridge assets (SOL + arbitrary SPL)
+## 5. Gas model + bridge assets
 
-- **SOL deposit** → native ZUL (gas), 1:1. `deposit_sol`.
-- **SPL deposit** → a deterministic L2 *wrapped* token (SPL, classic Token
-  program) at `wrapped_mint_address(l1_mint)`, credited to the recipient's ATA.
-  `deposit_spl` (works for Token + Token-2022 mints). Any SPL mint is accepted.
-- **Withdraw** (both): an L2 burn commits an asset-bound withdrawal leaf; once
-  the batch settles, `claim_withdrawal` (SOL) / `claim_withdrawal_spl` (SPL)
-  releases the asset from the per-mint vault. `getWithdrawalProof` takes an
-  optional 4th param (the L1 mint) for SPL withdrawals.
+**Gas = native ZUL = bridged ZUL token, 1:1.** ZUL is a fixed-supply token on
+Solana mainnet (9 decimals, matching the L2 native unit; ~1B × 1e9 ≈ 1e18 lamports
+< u64 max). There is **no native pre-mine and no faucet** — every unit of L2 gas
+exists only because the matching ZUL is locked in the bridge vault, so native
+supply is always fully backed and never exceeds the L1 supply.
 
-> **Gas:** ZUL is the gas token, like SOL on Solana. A user who only bridged an
-> SPL token holds no ZUL and cannot transact until they also bridge some SOL
-> (→ native ZUL). This is intended — there is no faucet on mainnet.
+The live gas mint (`config/mainnet` `gas_mint`):
+
+```
+okTCeDRb7NeExmvf3RZxEs29i9nfw8Cd51oFVB4FZUL
+```
+
+Verified on mainnet-beta: **Token-2022**, **9 decimals**, supply ~999,994,095 ZUL,
+**mint authority revoked** (fixed supply), extensions **metadataPointer +
+tokenMetadata only** (name "Zul", symbol "ZUL") — no transfer-fee/hook/permanent-
+delegate/etc., so it passes `require_safe_mint` and bridges cleanly. (The mint is
+Token-2022, which is exactly why `deposit_spl` uses the token interface + the
+extension safety check.)
+
+Asset routing:
+
+- **ZUL-SPL deposit** → native ZUL (gas), 1:1. This is the only path that mints
+  native lamports. Withdraw native ZUL → releases ZUL-SPL from the vault.
+- **SOL deposit** → a *wrapped* SOL token (asset, not gas). Withdraw → real SOL.
+- **Any other SPL deposit** → a deterministic L2 *wrapped* token at
+  `wrapped_mint_address(l1_mint)`. Withdraw → the original SPL. **Token and
+  Token-2022 both work** (the program uses the token interface).
+  - *Token-2022 safety:* `deposit_spl` credits the **actually-received** amount
+    (so a transfer-fee mint can't leave the vault under-collateralized), and
+    **rejects** mints with vault-unsafe extensions — transfer-hook, permanent
+    delegate, non-transferable, default-frozen, confidential transfer
+    (`SettlementError::UnsupportedMintExtension`). Plain Token-2022 and
+    transfer-fee mints are accepted; the L2 wrapped token is always a plain
+    classic-SPL token.
+- Bridged assets (wrapped SOL / SPL) can be shielded privately in the pool.
+- Withdrawals burn on L2 and commit an asset-bound leaf; once settled,
+  `claim_withdrawal` (native SOL) / `claim_withdrawal_spl` (any token incl. the
+  ZUL-SPL gas exit) releases from the per-mint vault.
+
+> **Consequence:** a user with no ZUL holds no gas and cannot transact — exactly
+> like needing ETH on an Ethereum L2. They acquire ZUL on Solana (buy the SPL)
+> and bridge it in. The chain is **unusable until** the ZUL-SPL mint exists, the
+> bridge `gas_mint` is set, and some is bridged in (see §0 launch order).
+
+> **Fix the L1 supply:** after minting exactly 1B ZUL-SPL, **revoke its mint
+> authority** — otherwise the supply isn't actually fixed and the 1:1 cap is a
+> promise, not a guarantee.
 
 ## 6. Web stack + backups
 
