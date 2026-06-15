@@ -11,6 +11,8 @@ name = "zul_settlement"
 
 [features]
 default = []
+# Selects the mainnet-beta program id (vanity, ends in ZUL). Default = devnet.
+mainnet = []
 cpi = ["no-entrypoint"]
 no-entrypoint = []
 no-idl = []

@@ -13,6 +13,13 @@ zul_da_log = "3E3dFuiYPi8BXGQo2SUzU5ctZ41U9ARCiqAuNTUjnk2f"
 zul_settlement = "2hwZWDpMYAMVZrmMjjHuFK4jbMrTJq62fL9d5cPPadHh"
 zul_da_log = "3E3dFuiYPi8BXGQo2SUzU5ctZ41U9ARCiqAuNTUjnk2f"
 
+# Mainnet-beta: vanity ids ending in ZUL. Build the programs with
+# `--features mainnet` so `declare_id!` matches these. Keypairs at
+# keys/mainnet/zul_{settlement,da_log}_mainnet-keypair.json (gitignored).
+[programs.mainnet]
+zul_settlement = "Po6oySWHr9oxFWVhZJ1Jca2HkvfzXxsK91n3R6mqZUL"
+zul_da_log = "by9fpRVSYN9ib7qwXJuak37d78cKUMFgNAWtjK3pZUL"
+
 [registry]
 url = "https://api.apr.dev"
 

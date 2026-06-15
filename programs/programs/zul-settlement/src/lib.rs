@@ -10,13 +10,59 @@
 
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
+use anchor_spl::token_2022::spl_token_2022::extension::{
+    BaseStateWithExtensions, ExtensionType, StateWithExtensions,
+};
+use anchor_spl::token_2022::spl_token_2022::state::Mint as Mint2022;
 use anchor_spl::token_interface::{
     self, Mint, TokenAccount, TokenInterface, TransferChecked,
 };
 
 pub mod smt;
 
+/// Token-2022 mint extensions that make a mint unsafe to bridge. Classic SPL
+/// mints carry no extensions, so this returns false for all of them.
+fn is_dangerous_extension(e: ExtensionType) -> bool {
+    matches!(
+        e,
+        // Needs extra accounts on every transfer; a plain CPI can't satisfy it.
+        ExtensionType::TransferHook
+        // A permanent delegate could move tokens straight out of the vault.
+            | ExtensionType::PermanentDelegate
+        // Can't be transferred at all → would trap on deposit/withdraw.
+            | ExtensionType::NonTransferable
+        // New ATAs may default to frozen → vault/recipient transfers fail.
+            | ExtensionType::DefaultAccountState
+        // Hidden amounts: the credited/released amount can't be trusted.
+            | ExtensionType::ConfidentialTransferMint
+            | ExtensionType::ConfidentialTransferFeeConfig
+    )
+}
+
+/// Reject mints whose extensions the bridge can't safely custody. Transfer-fee
+/// mints are allowed — `deposit_spl` credits the actually-received amount.
+fn require_safe_mint(mint_ai: &AccountInfo) -> Result<()> {
+    let data = mint_ai.try_borrow_data()?;
+    let state = StateWithExtensions::<Mint2022>::unpack(&data)
+        .map_err(|_| error!(SettlementError::UnsupportedMintExtension))?;
+    let exts = state
+        .get_extension_types()
+        .map_err(|_| error!(SettlementError::UnsupportedMintExtension))?;
+    for e in exts {
+        require!(
+            !is_dangerous_extension(e),
+            SettlementError::UnsupportedMintExtension
+        );
+    }
+    Ok(())
+}
+
+// Program id is cluster-specific: the default build targets devnet/testnet,
+// `--features mainnet` targets mainnet-beta (vanity id ending in ZUL).
+#[cfg(not(feature = "mainnet"))]
 declare_id!("2hwZWDpMYAMVZrmMjjHuFK4jbMrTJq62fL9d5cPPadHh");
+#[cfg(feature = "mainnet")]
+declare_id!("Po6oySWHr9oxFWVhZJ1Jca2HkvfzXxsK91n3R6mqZUL");
 
 const CONFIG_SEED: &[u8] = b"config";
 const VAULT_SEED: &[u8] = b"vault";
@@ -123,8 +169,15 @@ pub mod zul_settlement {
     /// Token-2022 mints via the token interface.
     pub fn deposit_spl(ctx: Context<DepositSpl>, amount: u64, l2_recipient: Pubkey) -> Result<()> {
         require!(amount > 0, SettlementError::ZeroAmount);
+        // Reject Token-2022 extensions that would make the bridge unsafe
+        // (vault-drainable or untransferable). Classic SPL mints have none.
+        require_safe_mint(&ctx.accounts.mint.to_account_info())?;
 
         let decimals = ctx.accounts.mint.decimals;
+        // Credit what the vault ACTUALLY receives, not the requested amount: a
+        // Token-2022 transfer-fee mint delivers less than `amount`, and crediting
+        // the requested amount would leave the bridge under-collateralized.
+        let before = ctx.accounts.vault_token_account.amount;
         token_interface::transfer_checked(
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
@@ -138,10 +191,18 @@ pub mod zul_settlement {
             amount,
             decimals,
         )?;
+        ctx.accounts.vault_token_account.reload()?;
+        let received = ctx
+            .accounts
+            .vault_token_account
+            .amount
+            .checked_sub(before)
+            .ok_or(SettlementError::Overflow)?;
+        require!(received > 0, SettlementError::ZeroAmount);
 
         emit!(Deposited {
             depositor: ctx.accounts.depositor.key(),
-            amount,
+            amount: received,
             l2_recipient,
             mint: Some(ctx.accounts.mint.key()),
             decimals,
@@ -340,6 +401,7 @@ pub struct DepositSpl<'info> {
         mut,
         associated_token::mint = mint,
         associated_token::authority = depositor,
+        associated_token::token_program = token_program,
     )]
     pub depositor_token_account: InterfaceAccount<'info, TokenAccount>,
     /// Per-mint vault ATA, created the first time this mint is bridged.
@@ -348,6 +410,7 @@ pub struct DepositSpl<'info> {
         payer = depositor,
         associated_token::mint = mint,
         associated_token::authority = vault,
+        associated_token::token_program = token_program,
     )]
     pub vault_token_account: InterfaceAccount<'info, TokenAccount>,
     #[account(mut)]
@@ -372,6 +435,7 @@ pub struct ClaimWithdrawalSpl<'info> {
         mut,
         associated_token::mint = mint,
         associated_token::authority = vault,
+        associated_token::token_program = token_program,
     )]
     pub vault_token_account: InterfaceAccount<'info, TokenAccount>,
     /// CHECK: token destination owner; bound into the proof, so any submitter is fine.
@@ -381,6 +445,7 @@ pub struct ClaimWithdrawalSpl<'info> {
         payer = payer,
         associated_token::mint = mint,
         associated_token::authority = recipient,
+        associated_token::token_program = token_program,
     )]
     pub recipient_token_account: InterfaceAccount<'info, TokenAccount>,
     #[account(
@@ -514,4 +579,39 @@ pub enum SettlementError {
     Overflow,
     #[msg("withdrawal proof did not verify against the posted state root")]
     InvalidProof,
+    #[msg("mint has a Token-2022 extension the bridge does not support")]
+    UnsupportedMintExtension,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dangerous_extensions_are_rejected() {
+        // Vault-drain / untransferable / hidden-amount extensions: rejected.
+        for e in [
+            ExtensionType::TransferHook,
+            ExtensionType::PermanentDelegate,
+            ExtensionType::NonTransferable,
+            ExtensionType::DefaultAccountState,
+            ExtensionType::ConfidentialTransferMint,
+            ExtensionType::ConfidentialTransferFeeConfig,
+        ] {
+            assert!(is_dangerous_extension(e), "{e:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn benign_extensions_are_allowed() {
+        // Transfer fee is handled (we credit the received amount); metadata is
+        // harmless. These must NOT be rejected.
+        for e in [
+            ExtensionType::TransferFeeConfig,
+            ExtensionType::MetadataPointer,
+            ExtensionType::TokenMetadata,
+        ] {
+            assert!(!is_dangerous_extension(e), "{e:?} should be allowed");
+        }
+    }
 }

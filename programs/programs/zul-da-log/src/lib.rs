@@ -8,7 +8,11 @@
 
 use anchor_lang::prelude::*;
 
+// Default build = devnet/testnet; `--features mainnet` = mainnet-beta (vanity).
+#[cfg(not(feature = "mainnet"))]
 declare_id!("3E3dFuiYPi8BXGQo2SUzU5ctZ41U9ARCiqAuNTUjnk2f");
+#[cfg(feature = "mainnet")]
+declare_id!("by9fpRVSYN9ib7qwXJuak37d78cKUMFgNAWtjK3pZUL");
 
 /// Solana caps transaction size at 1232 bytes; keep chunks well under it.
 pub const MAX_CHUNK_BYTES: usize = 900;
