@@ -2,9 +2,13 @@
 //! inclusion proof from the L2 RPC, finds the settlement batch whose posted
 //! state root the proof targets, and submits `claim_withdrawal`.
 //!
+//!   # native withdrawal
 //!   zul-l1-claim --config ./config/node.toml \
 //!       --recipient <L1_pubkey> --amount <lamports> --nonce <n> \
 //!       [--l2-rpc http://127.0.0.1:8899]
+//!   # SPL withdrawal (--asset = the L1 mint; --token-2022 for Token-2022 mints)
+//!   zul-l1-claim --config ... --recipient <pubkey> --amount <units> --nonce <n> \
+//!       --asset <mint> [--token-2022]
 
 use zul_primitives::NodeConfig;
 use serde_json::{json, Value};
@@ -21,6 +25,13 @@ fn arg(name: &str) -> Option<String> {
     }
     None
 }
+
+fn flag(name: &str) -> bool {
+    std::env::args().skip(1).any(|a| a == name)
+}
+
+const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
 fn load_keypair(path: &str) -> anyhow::Result<Keypair> {
     let raw = std::fs::read_to_string(path)?;
@@ -48,11 +59,19 @@ fn main() -> anyhow::Result<()> {
     let authority = load_keypair(&l1.bridge_authority_key_path)?;
     let client = zul_bridge::RpcL1Client::new(l1.rpc_url, authority, settlement, da_log)?;
 
-    // 1. Fetch the inclusion proof from the L2.
+    // Optional SPL asset (the L1 mint) — bound into the withdrawal commitment.
+    let asset = arg("--asset").map(|s| Pubkey::from_str(&s)).transpose()?;
+
+    // 1. Fetch the inclusion proof from the L2. For SPL, pass the mint as the
+    //    4th param so the proof targets the asset-bound commitment.
     println!("fetching withdrawal proof from {l2_rpc}…");
+    let params = match &asset {
+        Some(mint) => json!([recipient.to_string(), amount, nonce, mint.to_string()]),
+        None => json!([recipient.to_string(), amount, nonce]),
+    };
     let body = json!({
         "jsonrpc": "2.0", "id": 1, "method": "getWithdrawalProof",
-        "params": [recipient.to_string(), amount, nonce],
+        "params": params,
     });
     let text = ureq::post(&l2_rpc)
         .set("Content-Type", "application/json")
@@ -86,9 +105,25 @@ fn main() -> anyhow::Result<()> {
     };
     println!("  settled in batch {batch_no}");
 
-    // 3. Claim on L1.
-    println!("claiming {amount} lamports for {recipient}…");
-    let sig = client.claim_withdrawal(batch_no, amount, nonce, recipient, bitmap, &siblings)?;
+    // 3. Claim on L1 — SPL releases from the per-mint vault ATA, native from
+    //    the SOL vault.
+    let sig = match asset {
+        Some(mint) => {
+            let token_program = Pubkey::from_str(if flag("--token-2022") {
+                TOKEN_2022_PROGRAM
+            } else {
+                TOKEN_PROGRAM
+            })?;
+            println!("claiming {amount} of SPL {mint} for {recipient}…");
+            client.claim_withdrawal_spl(
+                batch_no, amount, nonce, recipient, mint, token_program, bitmap, &siblings,
+            )?
+        }
+        None => {
+            println!("claiming {amount} lamports for {recipient}…");
+            client.claim_withdrawal(batch_no, amount, nonce, recipient, bitmap, &siblings)?
+        }
+    };
     println!("withdrawal claimed on L1: {sig}");
     Ok(())
 }

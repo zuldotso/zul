@@ -31,6 +31,25 @@ const CONFIG_SEED: &[u8] = b"config";
 const VAULT_SEED: &[u8] = b"vault";
 const BATCH_SEED: &[u8] = b"batch";
 
+/// Associated-token-account program (derives a deterministic token account per
+/// (owner, mint)). The settlement program creates these for the vault and
+/// recipients on demand.
+fn ata_program_id() -> Pubkey {
+    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        .parse()
+        .expect("valid associated-token program id")
+}
+
+/// Derive the associated token account address for `owner`/`mint` under the
+/// given token program (classic Token or Token-2022).
+fn derive_ata(owner: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[owner.as_ref(), token_program.as_ref(), mint.as_ref()],
+        &ata_program_id(),
+    )
+    .0
+}
+
 /// `sha256("<namespace>:<name>")[..8]` — Anchor's instruction (namespace
 /// `global`) and event (`event`) discriminator.
 fn discriminator(namespace: &str, name: &str) -> [u8; 8] {
@@ -118,6 +137,89 @@ impl RpcL1Client {
             ],
             data,
         };
+        self.send_and_confirm(ix)
+    }
+
+    /// Deposit `amount` of an SPL token (`mint`, under `token_program`) into the
+    /// per-mint vault ATA, crediting `l2_recipient` with the wrapped token on
+    /// the L2. Signed + paid by the configured authority (which must hold the
+    /// tokens). For ops/testing — end users deposit via the SDK/frontend.
+    pub fn deposit_spl(
+        &self,
+        amount: u64,
+        mint: Pubkey,
+        token_program: Pubkey,
+        l2_recipient: Pubkey,
+    ) -> Result<String, L1Error> {
+        let mut data = discriminator("global", "deposit_spl").to_vec();
+        data.extend_from_slice(&amount.to_le_bytes());
+        data.extend_from_slice(l2_recipient.as_ref());
+        let depositor = self.authority.pubkey();
+        let ix = Instruction {
+            program_id: self.settlement_program,
+            accounts: vec![
+                AccountMeta::new_readonly(self.config_pda, false),
+                AccountMeta::new_readonly(self.vault_pda, false),
+                AccountMeta::new_readonly(mint, false),
+                AccountMeta::new(derive_ata(&depositor, &mint, &token_program), false),
+                AccountMeta::new(derive_ata(&self.vault_pda, &mint, &token_program), false),
+                AccountMeta::new(depositor, true),
+                AccountMeta::new_readonly(token_program, false),
+                AccountMeta::new_readonly(ata_program_id(), false),
+                AccountMeta::new_readonly(solana_sdk_ids::system_program::id(), false),
+            ],
+            data,
+        };
+        self.send_and_confirm(ix)
+    }
+
+    /// Claim an SPL withdrawal on L1: prove the asset-bound commitment is in
+    /// `batch_no`'s posted withdrawals root and release the tokens from the
+    /// per-mint vault ATA to `recipient`'s ATA.
+    pub fn claim_withdrawal_spl(
+        &self,
+        batch_no: u64,
+        amount: u64,
+        nonce: u64,
+        recipient: Pubkey,
+        mint: Pubkey,
+        token_program: Pubkey,
+        bitmap: [u8; 32],
+        siblings: &[[u8; 32]],
+    ) -> Result<String, L1Error> {
+        let mut data = discriminator("global", "claim_withdrawal_spl").to_vec();
+        data.extend_from_slice(&batch_no.to_le_bytes());
+        data.extend_from_slice(&amount.to_le_bytes());
+        data.extend_from_slice(&nonce.to_le_bytes());
+        data.extend_from_slice(&bitmap);
+        data.extend_from_slice(&(siblings.len() as u32).to_le_bytes());
+        for sibling in siblings {
+            data.extend_from_slice(sibling);
+        }
+        let (claim_pda, _) = Pubkey::find_program_address(
+            &[b"claim", recipient.as_ref(), &nonce.to_le_bytes()],
+            &self.settlement_program,
+        );
+        let ix = Instruction {
+            program_id: self.settlement_program,
+            accounts: vec![
+                AccountMeta::new_readonly(self.config_pda, false),
+                AccountMeta::new_readonly(self.batch_pda(batch_no), false),
+                AccountMeta::new_readonly(self.vault_pda, false),
+                AccountMeta::new_readonly(mint, false),
+                AccountMeta::new(derive_ata(&self.vault_pda, &mint, &token_program), false),
+                AccountMeta::new_readonly(recipient, false),
+                AccountMeta::new(derive_ata(&recipient, &mint, &token_program), false),
+                AccountMeta::new(claim_pda, false),
+                AccountMeta::new(self.authority.pubkey(), true),
+                AccountMeta::new_readonly(token_program, false),
+                AccountMeta::new_readonly(ata_program_id(), false),
+                AccountMeta::new_readonly(solana_sdk_ids::system_program::id(), false),
+            ],
+            data,
+        };
+        // send_and_confirm already prepends a 1.4M CU limit — ample for the
+        // depth-32 blake3 SMT verify plus the token transfer CPI.
         self.send_and_confirm(ix)
     }
 
@@ -572,7 +674,6 @@ impl RpcL1Client {
             .and_then(|l| l.as_array())
             .cloned()
             .unwrap_or_default();
-        let disc = discriminator("event", "Deposited");
         for line in logs {
             let Some(encoded) = line.as_str().and_then(|s| s.strip_prefix("Program data: ")) else {
                 continue;
@@ -580,21 +681,42 @@ impl RpcL1Client {
             let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded.trim()) else {
                 continue;
             };
-            // Deposited: disc(8) depositor(32) amount(8) l2_recipient(32)
-            if bytes.len() < 80 || bytes[..8] != disc {
-                continue;
+            if let Some(deposit) = parse_deposited_event(&bytes, signature) {
+                return Ok(Some(deposit));
             }
-            let amount = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
-            let l2_recipient = Pubkey::new_from_array(bytes[48..80].try_into().unwrap());
-            return Ok(Some(DepositEvent {
-                l1_signature: signature.to_string(),
-                mint: None, // the settlement program only bridges native SOL
-                amount,
-                l2_recipient,
-            }));
         }
         Ok(None)
     }
+}
+
+/// Decode an Anchor `Deposited` event from its `Program data:` payload bytes.
+/// Borsh layout: disc(8) depositor(32) amount(8) l2_recipient(32)
+///   mint: Option<Pubkey> (1-byte tag, +32 if Some) decimals(1).
+/// Tolerates the pre-SPL 80-byte layout (native, 9 decimals).
+fn parse_deposited_event(bytes: &[u8], signature: &str) -> Option<DepositEvent> {
+    let disc = discriminator("event", "Deposited");
+    if bytes.len() < 80 || bytes[..8] != disc {
+        return None;
+    }
+    let amount = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
+    let l2_recipient = Pubkey::new_from_array(bytes[48..80].try_into().unwrap());
+    let (mint, decimals) = match bytes.get(80) {
+        None => (None, 9),
+        Some(0) => (None, *bytes.get(81).unwrap_or(&9)),
+        Some(1) if bytes.len() >= 114 => (
+            Some(Pubkey::new_from_array(bytes[81..113].try_into().unwrap())),
+            bytes[113],
+        ),
+        // Malformed tail: treat as native rather than dropping the deposit.
+        _ => (None, 9),
+    };
+    Some(DepositEvent {
+        l1_signature: signature.to_string(),
+        mint,
+        decimals,
+        amount,
+        l2_recipient,
+    })
 }
 
 impl L1Client for RpcL1Client {
@@ -667,6 +789,50 @@ mod tests {
                 out
             }
         );
+    }
+
+    fn deposited_payload(mint: Option<Pubkey>, decimals: u8, amount: u64, recipient: &Pubkey) -> Vec<u8> {
+        let mut b = discriminator("event", "Deposited").to_vec();
+        b.extend_from_slice(Pubkey::new_unique().as_ref()); // depositor
+        b.extend_from_slice(&amount.to_le_bytes());
+        b.extend_from_slice(recipient.as_ref());
+        match mint {
+            None => b.push(0),
+            Some(m) => {
+                b.push(1);
+                b.extend_from_slice(m.as_ref());
+            }
+        }
+        b.push(decimals);
+        b
+    }
+
+    #[test]
+    fn decodes_native_and_spl_deposit_events() {
+        let recipient = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+
+        let native = parse_deposited_event(&deposited_payload(None, 9, 500, &recipient), "sig").unwrap();
+        assert_eq!(native.mint, None);
+        assert_eq!(native.decimals, 9);
+        assert_eq!(native.amount, 500);
+        assert_eq!(native.l2_recipient, recipient);
+
+        let spl = parse_deposited_event(&deposited_payload(Some(mint), 6, 1_000_000, &recipient), "sig").unwrap();
+        assert_eq!(spl.mint, Some(mint));
+        assert_eq!(spl.decimals, 6);
+        assert_eq!(spl.amount, 1_000_000);
+
+        // Legacy 80-byte layout (no mint/decimals tail) decodes as native.
+        let mut legacy = deposited_payload(None, 9, 7, &recipient);
+        legacy.truncate(80);
+        let old = parse_deposited_event(&legacy, "sig").unwrap();
+        assert_eq!((old.mint, old.decimals, old.amount), (None, 9, 7));
+
+        // Wrong discriminator → not a deposit.
+        let mut bad = deposited_payload(None, 9, 1, &recipient);
+        bad[0] ^= 0xff;
+        assert!(parse_deposited_event(&bad, "sig").is_none());
     }
 
     #[test]

@@ -56,12 +56,29 @@ pub fn withdrawal_pubkey(recipient: &[u8; 32], nonce: u64) -> Pubkey {
     ))
 }
 
-/// Account hash committed at the withdrawal leaf; the L1 `claim_withdrawal`
-/// recomputes this and verifies its inclusion against a posted state root.
-pub fn withdrawal_account_hash(recipient: &[u8; 32], amount: u64, nonce: u64) -> H256 {
+/// Reserved asset id for native ZUL/SOL withdrawals. SPL withdrawals use the
+/// L1 mint pubkey bytes. Binding the asset into the commitment is what lets the
+/// L1 `claim_withdrawal_spl` know which token to release without trusting the
+/// caller.
+pub const NATIVE_ASSET_ID: [u8; 32] = [0u8; 32];
+
+/// Account hash committed at the withdrawal leaf; the L1 claim recomputes this
+/// and verifies its inclusion against a posted state root. `asset_id` is
+/// [`NATIVE_ASSET_ID`] for native withdrawals or the L1 mint for SPL.
+pub fn withdrawal_account_hash(
+    recipient: &[u8; 32],
+    asset_id: &[u8; 32],
+    amount: u64,
+    nonce: u64,
+) -> H256 {
     blake3_concat(
         WITHDRAW_DOMAIN,
-        &[recipient, &amount.to_le_bytes(), &nonce.to_le_bytes()],
+        &[
+            recipient,
+            asset_id,
+            &amount.to_le_bytes(),
+            &nonce.to_le_bytes(),
+        ],
     )
 }
 
@@ -70,12 +87,17 @@ pub struct WithdrawTx {
     pub transaction: VersionedTransaction,
     pub fee_payer: Pubkey,
     pub recipient: [u8; 32],
+    /// [`NATIVE_ASSET_ID`] for a native withdrawal, or the L1 mint for an SPL
+    /// withdrawal (which token to burn on L2 and release on L1).
+    pub asset_id: [u8; 32],
     pub amount: u64,
     pub nonce: u64,
 }
 
 /// Split out bridge-withdraw transactions: exactly one instruction, targeting
-/// `BRIDGE_WITHDRAW_PROGRAM_ID`, data = recipient(32) || amount(8) || nonce(8).
+/// `BRIDGE_WITHDRAW_PROGRAM_ID`. Two wire layouts share the program id:
+///   native (48B): recipient(32) || amount(8) || nonce(8)
+///   SPL    (80B): recipient(32) || asset_id(32) || amount(8) || nonce(8)
 pub fn partition_withdraws(
     transactions: Vec<VersionedTransaction>,
 ) -> (Vec<WithdrawTx>, Vec<VersionedTransaction>) {
@@ -83,10 +105,11 @@ pub fn partition_withdraws(
     let mut regular = Vec::new();
     for tx in transactions {
         match parse_withdraw(&tx) {
-            Some((fee_payer, recipient, amount, nonce)) => withdraws.push(WithdrawTx {
+            Some((fee_payer, recipient, asset_id, amount, nonce)) => withdraws.push(WithdrawTx {
                 transaction: tx,
                 fee_payer,
                 recipient,
+                asset_id,
                 amount,
                 nonce,
             }),
@@ -96,7 +119,7 @@ pub fn partition_withdraws(
     (withdraws, regular)
 }
 
-fn parse_withdraw(tx: &VersionedTransaction) -> Option<(Pubkey, [u8; 32], u64, u64)> {
+fn parse_withdraw(tx: &VersionedTransaction) -> Option<(Pubkey, [u8; 32], [u8; 32], u64, u64)> {
     let message = &tx.message;
     let instructions = message.instructions();
     if instructions.len() != 1 {
@@ -107,14 +130,24 @@ fn parse_withdraw(tx: &VersionedTransaction) -> Option<(Pubkey, [u8; 32], u64, u
     if keys.get(ix.program_id_index as usize)? != &BRIDGE_WITHDRAW_PROGRAM_ID {
         return None;
     }
-    if ix.data.len() != 48 {
-        return None;
-    }
     let fee_payer = *keys.first()?;
-    let recipient: [u8; 32] = ix.data[0..32].try_into().ok()?;
-    let amount = u64::from_le_bytes(ix.data[32..40].try_into().ok()?);
-    let nonce = u64::from_le_bytes(ix.data[40..48].try_into().ok()?);
-    Some((fee_payer, recipient, amount, nonce))
+    let recipient: [u8; 32] = ix.data.get(0..32)?.try_into().ok()?;
+    let (asset_id, amount, nonce) = match ix.data.len() {
+        // Native: recipient(32) || amount(8) || nonce(8)
+        48 => (
+            NATIVE_ASSET_ID,
+            u64::from_le_bytes(ix.data[32..40].try_into().ok()?),
+            u64::from_le_bytes(ix.data[40..48].try_into().ok()?),
+        ),
+        // SPL: recipient(32) || asset_id(32) || amount(8) || nonce(8)
+        80 => (
+            ix.data[32..64].try_into().ok()?,
+            u64::from_le_bytes(ix.data[64..72].try_into().ok()?),
+            u64::from_le_bytes(ix.data[72..80].try_into().ok()?),
+        ),
+        _ => return None,
+    };
+    Some((fee_payer, recipient, asset_id, amount, nonce))
 }
 
 /// Spawn the deposit watcher thread. Local config is validated up front (bad
@@ -180,8 +213,8 @@ mod tests {
         // Pinned in programs/zul-settlement/src/smt.rs::withdrawal_hashes_match_l2.
         let recipient = [7u8; 32];
         assert_eq!(
-            hex(&withdrawal_account_hash(&recipient, 1000, 5)),
-            "6925634e356b691780b4a731d5faad074613a8502daf904911ee18d143c120c7"
+            hex(&withdrawal_account_hash(&recipient, &NATIVE_ASSET_ID, 1000, 5)),
+            "29002aa04988b6423f4ac5f5ba397f68a7a49dbc6eb0c985fe9dbf72301c6729"
         );
         assert_eq!(
             hex(withdrawal_pubkey(&recipient, 5).as_ref()),

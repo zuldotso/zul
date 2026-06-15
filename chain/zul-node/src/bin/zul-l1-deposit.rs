@@ -1,10 +1,14 @@
-//! zul-l1-deposit: deposit SOL into the L1 bridge vault to credit an L2
-//! recipient — a bridge ops/test tool for the deposit flow.
+//! zul-l1-deposit: deposit SOL (or an SPL token) into the L1 bridge to credit
+//! an L2 recipient — a bridge ops/test tool for the deposit flow.
 //!
+//!   # native SOL → native ZUL
 //!   zul-l1-deposit --config ./config/node.toml --amount <lamports> --recipient <pubkey>
+//!   # SPL token → wrapped L2 token (--asset = L1 mint; --token-2022 for Token-2022 mints)
+//!   zul-l1-deposit --config ... --amount <units> --recipient <pubkey> --asset <mint> [--token-2022]
 //!
 //! Signs with the configured `[l1] bridge_authority_key_path`, so that key
-//! must hold enough devnet SOL to cover the deposit + fees.
+//! must hold enough SOL to cover fees (and, for SPL, the tokens being
+//! deposited in its associated token account).
 
 use zul_primitives::NodeConfig;
 use solana_sdk::{pubkey::Pubkey, signature::Keypair};
@@ -19,6 +23,14 @@ fn arg(name: &str) -> Option<String> {
     }
     None
 }
+
+fn flag(name: &str) -> bool {
+    std::env::args().skip(1).any(|a| a == name)
+}
+
+/// Classic SPL Token program (default) and Token-2022.
+const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
 fn load_keypair(path: &str) -> anyhow::Result<Keypair> {
     let raw = std::fs::read_to_string(path)?;
@@ -45,8 +57,24 @@ fn main() -> anyhow::Result<()> {
     let authority = load_keypair(&l1.bridge_authority_key_path)?;
 
     let client = zul_bridge::RpcL1Client::new(l1.rpc_url, authority, settlement, da_log)?;
-    println!("depositing {amount} lamports for L2 recipient {recipient}…");
-    let sig = client.deposit_sol(amount, recipient)?;
+    let sig = match arg("--asset") {
+        // SPL deposit → wrapped L2 token.
+        Some(mint_str) => {
+            let mint = Pubkey::from_str(&mint_str)?;
+            let token_program = Pubkey::from_str(if flag("--token-2022") {
+                TOKEN_2022_PROGRAM
+            } else {
+                TOKEN_PROGRAM
+            })?;
+            println!("depositing {amount} of SPL {mint} for L2 recipient {recipient}…");
+            client.deposit_spl(amount, mint, token_program, recipient)?
+        }
+        // Native SOL deposit → native ZUL.
+        None => {
+            println!("depositing {amount} lamports for L2 recipient {recipient}…");
+            client.deposit_sol(amount, recipient)?
+        }
+    };
     println!("L1 deposit confirmed: {sig}");
     Ok(())
 }

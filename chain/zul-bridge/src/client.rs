@@ -26,6 +26,8 @@ pub struct DepositEvent {
     pub l1_signature: String,
     /// Asset: None = SOL into the vault; Some(mint) = SPL deposit.
     pub mint: Option<Pubkey>,
+    /// Token decimals (9 for native SOL/ZUL) so the L2 wrapped mint matches.
+    pub decimals: u8,
     pub amount: u64,
     pub l2_recipient: Pubkey,
 }

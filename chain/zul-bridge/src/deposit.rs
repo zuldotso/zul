@@ -129,6 +129,7 @@ mod tests {
         DepositEvent {
             l1_signature: sig.into(),
             mint,
+            decimals: 9,
             amount,
             l2_recipient: Pubkey::new_unique(),
         }
