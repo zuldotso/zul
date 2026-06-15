@@ -11,9 +11,10 @@ pub mod genesis;
 pub mod hash;
 pub mod merkle;
 pub mod meta;
+pub mod wrapped_spl;
 
 pub use block::{Block, BlockHeader};
-pub use config::NodeConfig;
+pub use config::{Network, NodeConfig};
 pub use genesis::{Allocation, GenesisConfig};
 pub use hash::{blake3_32, H256};
 pub use meta::ExecutedTransactionMeta;
