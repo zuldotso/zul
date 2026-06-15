@@ -46,6 +46,10 @@ pub struct NodeOptions {
     /// every transfer/unshield proof — the pool is closed-but-safe until
     /// keys are loaded; shields (no proof) still work.
     pub pool_verifying_keys: VerifyingKeys,
+    /// L1 mint whose deposits credit the native gas token 1:1 (mainnet ZUL-SPL).
+    /// `None` = native ZUL is faucet/SOL-backed (testnet); `Some` = native ZUL
+    /// is the bridged gas mint, and SOL/other assets are wrapped tokens.
+    pub gas_mint: Option<Pubkey>,
 }
 
 impl Default for NodeOptions {
@@ -61,6 +65,7 @@ impl Default for NodeOptions {
             faucet: None,
             faucet_max_lamports: 10_000_000_000,
             pool_verifying_keys: VerifyingKeys::unconfigured(),
+            gas_mint: None,
         }
     }
 }
@@ -238,29 +243,33 @@ impl Node {
             if writes.contains_key(&receipt) || self.store.get_account(&receipt)?.is_some() {
                 continue;
             }
-            match deposit.mint {
-                // Native SOL deposit → credit native ZUL lamports 1:1.
-                None => {
-                    let mut account = writes
-                        .get(&deposit.l2_recipient)
-                        .cloned()
-                        .flatten()
-                        .or(self.store.get_account(&deposit.l2_recipient)?)
-                        .unwrap_or_else(|| StoredAccount::new_system(0));
-                    account.lamports = account.lamports.saturating_add(deposit.amount);
-                    writes.insert(deposit.l2_recipient, Some(account));
-                }
-                // SPL deposit → mint the deterministic wrapped token to the
-                // recipient's associated token account.
-                Some(l1_mint) => {
-                    self.credit_wrapped_spl(
-                        &l1_mint,
-                        &deposit.l2_recipient,
-                        deposit.amount,
-                        deposit.decimals,
-                        writes,
-                    )?;
-                }
+            // Asset routing depends on whether a gas mint is configured:
+            //  - gas_mint deposit            → credit NATIVE ZUL 1:1 (gas)
+            //  - SOL (None), no gas_mint set  → credit native ZUL (testnet legacy)
+            //  - SOL (None), gas_mint set     → wrap as wSOL (SOL is not gas on mainnet)
+            //  - any other SPL                → wrapped token
+            let gas_mint = self.options.gas_mint;
+            let credits_native_gas = match deposit.mint {
+                Some(m) => Some(m) == gas_mint,
+                None => gas_mint.is_none(),
+            };
+            if credits_native_gas {
+                let mut account = writes
+                    .get(&deposit.l2_recipient)
+                    .cloned()
+                    .flatten()
+                    .or(self.store.get_account(&deposit.l2_recipient)?)
+                    .unwrap_or_else(|| StoredAccount::new_system(0));
+                account.lamports = account.lamports.saturating_add(deposit.amount);
+                writes.insert(deposit.l2_recipient, Some(account));
+            } else {
+                // Wrapped: SOL (gas_mint set) uses the canonical wSOL mint;
+                // every other SPL uses its own L1 mint.
+                let (mint, decimals) = match deposit.mint {
+                    Some(m) => (m, deposit.decimals),
+                    None => (zul_primitives::wrapped_spl::native_sol_mint(), 9),
+                };
+                self.credit_wrapped_spl(&mint, &deposit.l2_recipient, deposit.amount, decimals, writes)?;
             }
 
             let mut data = Vec::with_capacity(40);
@@ -408,7 +417,16 @@ impl Node {
     ) -> Vec<(Pubkey, H256)> {
         let mut leaves = Vec::new();
         for w in withdraws {
-            let is_native = w.asset_id == crate::bridge::NATIVE_ASSET_ID;
+            // A withdrawal burns native ZUL lamports when it exits the native
+            // asset: the reserved native id (testnet, → SOL on claim) OR the
+            // configured gas mint (mainnet native ZUL, → ZUL-SPL on claim). Any
+            // other asset id is a wrapped token, burned from its ATA.
+            let is_native = w.asset_id == crate::bridge::NATIVE_ASSET_ID
+                || self
+                    .options
+                    .gas_mint
+                    .map(|m| m.to_bytes() == w.asset_id)
+                    .unwrap_or(false);
             // Every withdrawal pays the native fee; a native withdrawal also
             // burns `amount` lamports, an SPL one burns the wrapped token.
             let needed_native = if is_native {
@@ -921,6 +939,10 @@ mod tests {
     }
 
     fn setup() -> Harness {
+        setup_with(|_| {})
+    }
+
+    fn setup_with(modify: impl FnOnce(&mut NodeOptions)) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&dir.path().join("zul.redb")).unwrap());
         let sequencer = Keypair::new();
@@ -943,18 +965,13 @@ mod tests {
                 },
             ],
         };
-        let node = Node::new(
-            store,
-            &genesis,
-            sequencer,
-            vec![],
-            NodeOptions {
-                faucet: Some(faucet),
-                heartbeat: Duration::from_secs(3600),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let mut options = NodeOptions {
+            faucet: Some(faucet),
+            heartbeat: Duration::from_secs(3600),
+            ..Default::default()
+        };
+        modify(&mut options);
+        let node = Node::new(store, &genesis, sequencer, vec![], options).unwrap();
         Harness {
             _dir: dir,
             node,
@@ -971,6 +988,52 @@ mod tests {
             &[payer],
             Hash::new_from_array(blockhash),
         ))
+    }
+
+    #[tokio::test]
+    async fn gas_mint_deposit_credits_native_other_spl_wrapped() {
+        use zul_primitives::wrapped_spl as w;
+        let gas_mint = Pubkey::new_unique();
+        let other_mint = Pubkey::new_unique();
+        let h = setup_with(|o| o.gas_mint = Some(gas_mint));
+
+        let gas_recipient = Pubkey::new_unique();
+        let spl_recipient = Pubkey::new_unique();
+        h.node.enqueue_deposits(vec![
+            // The gas mint → native ZUL lamports (1:1, the gas-onboarding path).
+            DepositEvent {
+                l1_signature: "gasSig".into(),
+                mint: Some(gas_mint),
+                decimals: 9,
+                amount: 3 * ZUL,
+                l2_recipient: gas_recipient,
+            },
+            // Any other SPL → a wrapped token, NOT native gas.
+            DepositEvent {
+                l1_signature: "otherSig".into(),
+                mint: Some(other_mint),
+                decimals: 6,
+                amount: 1_000_000,
+                l2_recipient: spl_recipient,
+            },
+        ]);
+        h.node.try_produce_block().unwrap().expect("deposit block");
+
+        // Gas mint credited NATIVE lamports (no wrapped mint created for it).
+        let gas_bal = h.node.store().get_account(&gas_recipient).unwrap().unwrap().lamports;
+        assert_eq!(gas_bal, 3 * ZUL);
+        let gas_wmint = w::wrapped_mint_address(&gas_mint);
+        assert!(h.node.store().get_account(&gas_wmint).unwrap().is_none());
+
+        // Other SPL credited a WRAPPED token, not native lamports.
+        let other_wmint = w::wrapped_mint_address(&other_mint);
+        let spl_ata = w::associated_token_address(&spl_recipient, &other_wmint);
+        assert_eq!(
+            w::token_account_amount(&h.node.store().get_account(&spl_ata).unwrap().unwrap().data),
+            Some(1_000_000)
+        );
+        // The SPL recipient got no native gas (must bridge the gas mint for that).
+        assert!(h.node.store().get_account(&spl_recipient).unwrap().is_none());
     }
 
     #[tokio::test]

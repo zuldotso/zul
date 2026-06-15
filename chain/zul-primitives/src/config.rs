@@ -89,6 +89,11 @@ pub struct L1Section {
     pub bridge_authority_key_path: String,
     #[serde(default = "default_batch_interval")]
     pub batch_interval_slots: u64,
+    /// L1 mint whose deposits credit the NATIVE gas token 1:1 (the ZUL-SPL on
+    /// mainnet), and which a native withdrawal releases. Empty = no gas mint:
+    /// native ZUL is unbacked/faucet-minted (testnet) rather than bridged.
+    #[serde(default)]
+    pub gas_mint: String,
 }
 
 impl Default for L1Section {
@@ -102,6 +107,7 @@ impl Default for L1Section {
             da_log_program_id: String::new(),
             bridge_authority_key_path: String::new(),
             batch_interval_slots: default_batch_interval(),
+            gas_mint: String::new(),
         }
     }
 }

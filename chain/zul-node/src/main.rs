@@ -130,6 +130,23 @@ async fn run() -> anyhow::Result<()> {
     // shields still work). Path defaults to ./params next to the binary.
     let pool_verifying_keys = load_pool_keys(&config.node.data_dir);
 
+    // Gas mint: the L1 mint whose deposits credit native ZUL 1:1 (mainnet
+    // ZUL-SPL). Empty = unset (native ZUL is faucet/SOL-backed, testnet).
+    let gas_mint = if config.l1.gas_mint.is_empty() {
+        None
+    } else {
+        Some(
+            config
+                .l1
+                .gas_mint
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid l1.gas_mint: {e}"))?,
+        )
+    };
+    if let Some(m) = &gas_mint {
+        tracing::info!(gas_mint = %m, "native gas is the bridged ZUL-SPL (1:1)");
+    }
+
     let store = Arc::new(Store::open(&config.node.data_dir.join("zul.redb"))?);
     let options = NodeOptions {
         slot_duration: Duration::from_millis(config.node.slot_duration_ms),
@@ -139,6 +156,7 @@ async fn run() -> anyhow::Result<()> {
         faucet,
         faucet_max_lamports: config.rpc.faucet_max_lamports,
         pool_verifying_keys,
+        gas_mint,
         ..Default::default()
     };
     let node = Arc::new(Node::new(store.clone(), &genesis, sequencer, vec![], options)?);

@@ -26,3 +26,6 @@ settlement_program_id = ""
 da_log_program_id = ""
 bridge_authority_key_path = ""
 batch_interval_slots = 120
+# Empty on testnet: native ZUL is faucet-minted / SOL-backed (a SOL deposit
+# credits native ZUL). Set this only on a chain that uses a bridged gas mint.
+gas_mint = ""

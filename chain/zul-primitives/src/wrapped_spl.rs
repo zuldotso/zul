@@ -29,6 +29,15 @@ pub const ATA_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
 
 const WRAPPED_MINT_DOMAIN: &[u8] = b"PL2:bridge:wrapped-mint:v1";
 
+/// Solana's canonical wrapped-SOL mint. When a gas mint is configured (mainnet),
+/// a native-SOL deposit is credited as the wrapped token of this mint, so SOL is
+/// a normal bridged asset, not the gas token.
+pub fn native_sol_mint() -> Pubkey {
+    "So11111111111111111111111111111111111111112"
+        .parse()
+        .expect("valid wSOL mint")
+}
+
 /// Reserved authority recorded as the wrapped mint's `mint_authority`. It is
 /// not a real keypair (no one can sign for it), so the only way wrapped supply
 /// can grow is the node's deposit synthesis — never an SVM `MintTo`.

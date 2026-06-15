@@ -25,9 +25,18 @@ faucet_enabled = false
 # rate-limited); pass it via ZUL_L1_RPC_URL so the API key never lands in git.
 enabled = false
 rpc_url = "https://api.mainnet-beta.solana.com"
-settlement_program_id = ""
-da_log_program_id = ""
+# Mainnet program ids (vanity, end in ZUL). Deploy the `--features mainnet`
+# build to these, then flip enabled = true.
+settlement_program_id = "Po6oySWHr9oxFWVhZJ1Jca2HkvfzXxsK91n3R6mqZUL"
+da_log_program_id = "by9fpRVSYN9ib7qwXJuak37d78cKUMFgNAWtjK3pZUL"
 bridge_authority_key_path = ""
 # Larger interval than testnet: each batch costs real SOL (fee + rent).
 # Tune against docs/MAINNET-COST.md.
 batch_interval_slots = 600
+# The L1 ZUL mint whose deposits credit NATIVE gas 1:1 (and which a native
+# withdrawal releases). This is the live ZUL token: a Token-2022 mint, 9
+# decimals (matches the native unit), ~1B fixed supply (mint authority revoked),
+# extensions metadataPointer + tokenMetadata only (no transfer-fee/hook/etc., so
+# it passes the bridge's mint-safety check). SOL and every other SPL bridge to
+# wrapped tokens regardless. See docs/DEPLOY-MAINNET.md §Gas model.
+gas_mint = "okTCeDRb7NeExmvf3RZxEs29i9nfw8Cd51oFVB4FZUL"
