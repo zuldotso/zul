@@ -558,8 +558,14 @@ pub fn build_module<B: RpcBackend>(backend: Arc<B>, faucet_enabled: bool) -> Rpc
             };
             let amount = num(parsed.get(1)).ok_or_else(|| invalid_params("expected amount"))?;
             let nonce = num(parsed.get(2)).ok_or_else(|| invalid_params("expected nonce"))?;
+            // Optional 4th param: asset (L1 mint, base58) for SPL withdrawals.
+            // Omitted = native ZUL/SOL (all-zero asset id).
+            let asset = match parsed.get(3) {
+                Some(v) if !v.is_null() => parse_pubkey(Some(v))?.to_bytes(),
+                _ => [0u8; 32],
+            };
             let (state_root, proof) = ctx
-                .withdrawal_proof(&recipient, amount, nonce)
+                .withdrawal_proof(&recipient, &asset, amount, nonce)
                 .map_err(invalid_params)?;
             Ok::<_, ErrorObjectOwned>(json!({
                 "stateRoot": bs58::encode(state_root).into_string(),

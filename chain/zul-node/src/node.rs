@@ -202,7 +202,7 @@ impl Node {
                         crate::withdraw_smt::apply(
                             &mut tree,
                             &crate::bridge::withdrawal_pubkey(&w.recipient, w.nonce),
-                            &crate::bridge::withdrawal_account_hash(&w.recipient, w.amount, w.nonce),
+                            &crate::bridge::withdrawal_account_hash(&w.recipient, &w.asset_id, w.amount, w.nonce),
                         );
                     }
                 }
@@ -238,14 +238,30 @@ impl Node {
             if writes.contains_key(&receipt) || self.store.get_account(&receipt)?.is_some() {
                 continue;
             }
-            let mut account = writes
-                .get(&deposit.l2_recipient)
-                .cloned()
-                .flatten()
-                .or(self.store.get_account(&deposit.l2_recipient)?)
-                .unwrap_or_else(|| StoredAccount::new_system(0));
-            account.lamports = account.lamports.saturating_add(deposit.amount);
-            writes.insert(deposit.l2_recipient, Some(account));
+            match deposit.mint {
+                // Native SOL deposit → credit native ZUL lamports 1:1.
+                None => {
+                    let mut account = writes
+                        .get(&deposit.l2_recipient)
+                        .cloned()
+                        .flatten()
+                        .or(self.store.get_account(&deposit.l2_recipient)?)
+                        .unwrap_or_else(|| StoredAccount::new_system(0));
+                    account.lamports = account.lamports.saturating_add(deposit.amount);
+                    writes.insert(deposit.l2_recipient, Some(account));
+                }
+                // SPL deposit → mint the deterministic wrapped token to the
+                // recipient's associated token account.
+                Some(l1_mint) => {
+                    self.credit_wrapped_spl(
+                        &l1_mint,
+                        &deposit.l2_recipient,
+                        deposit.amount,
+                        deposit.decimals,
+                        writes,
+                    )?;
+                }
+            }
 
             let mut data = Vec::with_capacity(40);
             data.extend_from_slice(&deposit.amount.to_le_bytes());
@@ -271,6 +287,115 @@ impl Node {
         Ok(credited)
     }
 
+    /// Mint `amount` of the wrapped token for `l1_mint` to `recipient`'s
+    /// associated token account, creating the wrapped mint and/or the ATA on
+    /// first use. Synthesizes SPL account states directly (consistent with how
+    /// native deposits write lamports); the byte layouts are exact, so the
+    /// balance is spendable through the SVM Token program.
+    fn credit_wrapped_spl(
+        &self,
+        l1_mint: &Pubkey,
+        recipient: &Pubkey,
+        amount: u64,
+        decimals: u8,
+        writes: &mut HashMap<Pubkey, Option<StoredAccount>>,
+    ) -> anyhow::Result<()> {
+        use zul_primitives::wrapped_spl as w;
+        let wmint = w::wrapped_mint_address(l1_mint);
+
+        // Wrapped mint: bump supply in place, or create it on first deposit.
+        let mint_acc = writes
+            .get(&wmint)
+            .cloned()
+            .flatten()
+            .or(self.store.get_account(&wmint)?);
+        let mint_acc = match mint_acc {
+            Some(mut acc) => {
+                let supply = w::mint_supply(&acc.data).unwrap_or(0).saturating_add(amount);
+                w::set_mint_supply(&mut acc.data, supply);
+                acc
+            }
+            None => StoredAccount {
+                lamports: w::rent_exempt_lamports(w::MINT_LEN),
+                data: w::pack_mint(&w::BRIDGE_MINT_AUTHORITY, amount, decimals),
+                owner: w::TOKEN_PROGRAM_ID,
+                executable: false,
+                rent_epoch: u64::MAX,
+            },
+        };
+        writes.insert(wmint, Some(mint_acc));
+
+        // Recipient ATA: bump amount in place, or create it.
+        let ata = w::associated_token_address(recipient, &wmint);
+        let ata_acc = writes
+            .get(&ata)
+            .cloned()
+            .flatten()
+            .or(self.store.get_account(&ata)?);
+        let ata_acc = match ata_acc {
+            Some(mut acc) => {
+                let bal = w::token_account_amount(&acc.data)
+                    .unwrap_or(0)
+                    .saturating_add(amount);
+                w::set_token_account_amount(&mut acc.data, bal);
+                acc
+            }
+            None => StoredAccount {
+                lamports: w::rent_exempt_lamports(w::ACCOUNT_LEN),
+                data: w::pack_token_account(&wmint, recipient, amount),
+                owner: w::TOKEN_PROGRAM_ID,
+                executable: false,
+                rent_epoch: u64::MAX,
+            },
+        };
+        writes.insert(ata, Some(ata_acc));
+        Ok(())
+    }
+
+    /// Burn `amount` of `l1_mint`'s wrapped token from `owner`'s ATA (and reduce
+    /// the wrapped mint supply) for a withdrawal. Returns false if the balance
+    /// is insufficient or the account is missing.
+    fn burn_wrapped_spl(
+        &self,
+        l1_mint: &Pubkey,
+        owner: &Pubkey,
+        amount: u64,
+        writes: &mut HashMap<Pubkey, Option<StoredAccount>>,
+    ) -> anyhow::Result<bool> {
+        use zul_primitives::wrapped_spl as w;
+        if amount == 0 {
+            return Ok(false);
+        }
+        let wmint = w::wrapped_mint_address(l1_mint);
+        let ata = w::associated_token_address(owner, &wmint);
+        let Some(mut acc) = writes
+            .get(&ata)
+            .cloned()
+            .flatten()
+            .or(self.store.get_account(&ata)?)
+        else {
+            return Ok(false);
+        };
+        let bal = w::token_account_amount(&acc.data).unwrap_or(0);
+        if bal < amount {
+            return Ok(false);
+        }
+        w::set_token_account_amount(&mut acc.data, bal - amount);
+        writes.insert(ata, Some(acc));
+
+        if let Some(mut macc) = writes
+            .get(&wmint)
+            .cloned()
+            .flatten()
+            .or(self.store.get_account(&wmint)?)
+        {
+            let supply = w::mint_supply(&macc.data).unwrap_or(0).saturating_sub(amount);
+            w::set_mint_supply(&mut macc.data, supply);
+            writes.insert(wmint, Some(macc));
+        }
+        Ok(true)
+    }
+
     /// Apply bridge withdrawals: burn `amount + fee` from the withdrawer.
     /// Returns the `(withdrawal_pubkey, account_hash)` leaves to insert into
     /// the withdrawals tree once the block commits — the L1 `claim_withdrawal`
@@ -283,20 +408,48 @@ impl Node {
     ) -> Vec<(Pubkey, H256)> {
         let mut leaves = Vec::new();
         for w in withdraws {
+            let is_native = w.asset_id == crate::bridge::NATIVE_ASSET_ID;
+            // Every withdrawal pays the native fee; a native withdrawal also
+            // burns `amount` lamports, an SPL one burns the wrapped token.
+            let needed_native = if is_native {
+                w.amount.saturating_add(pool::POOL_TX_FEE)
+            } else {
+                pool::POOL_TX_FEE
+            };
             let payer = writes
                 .get(&w.fee_payer)
                 .cloned()
                 .flatten()
                 .or(self.store.get_account(&w.fee_payer).ok().flatten());
-            let total = w.amount.saturating_add(pool::POOL_TX_FEE);
-            match payer {
-                Some(mut acc) if acc.lamports >= total && w.amount > 0 => {
-                    acc.lamports -= total;
-                    let post = acc.lamports;
-                    writes.insert(w.fee_payer, Some(acc));
 
-                    // Fee to the collector (the withdrawn amount is burned;
-                    // the matching SOL is released from the L1 vault on claim).
+            let post = match payer {
+                Some(mut acc) if acc.lamports >= needed_native && w.amount > 0 => {
+                    // Burn the SPL token first so a shortfall doesn't take the fee.
+                    let token_ok = is_native
+                        || self
+                            .burn_wrapped_spl(
+                                &Pubkey::new_from_array(w.asset_id),
+                                &w.fee_payer,
+                                w.amount,
+                                writes,
+                            )
+                            .unwrap_or(false);
+                    if token_ok {
+                        acc.lamports -= needed_native;
+                        let post = acc.lamports;
+                        writes.insert(w.fee_payer, Some(acc));
+                        Some(post)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            match post {
+                Some(post) => {
+                    // Fee to the collector (the withdrawn value is burned on L2;
+                    // the matching asset is released from the L1 vault on claim).
                     let mut collector = writes
                         .get(&self.fee_collector)
                         .cloned()
@@ -308,10 +461,16 @@ impl Node {
 
                     leaves.push((
                         crate::bridge::withdrawal_pubkey(&w.recipient, w.nonce),
-                        crate::bridge::withdrawal_account_hash(&w.recipient, w.amount, w.nonce),
+                        crate::bridge::withdrawal_account_hash(
+                            &w.recipient,
+                            &w.asset_id,
+                            w.amount,
+                            w.nonce,
+                        ),
                     ));
                     tracing::info!(
                         amount = w.amount,
+                        native = is_native,
                         nonce = w.nonce,
                         "committed L2 withdrawal (claimable on L1 once settled)"
                     );
@@ -324,13 +483,13 @@ impl Node {
                             0,
                             post,
                             vec![format!(
-                                "Program log: withdraw {} lamports to L1, nonce {}",
+                                "Program log: withdraw {} to L1, nonce {}",
                                 w.amount, w.nonce
                             )],
                         ),
                     ));
                 }
-                _ => included.push((
+                None => included.push((
                     w.transaction,
                     pool::pool_meta(
                         false,
@@ -351,11 +510,12 @@ impl Node {
     pub fn compute_withdrawal_proof(
         &self,
         recipient: &[u8; 32],
+        asset_id: &[u8; 32],
         amount: u64,
         nonce: u64,
     ) -> anyhow::Result<(H256, zul_store::SmtProof)> {
         let leaf = crate::bridge::withdrawal_pubkey(recipient, nonce);
-        let account_hash = crate::bridge::withdrawal_account_hash(recipient, amount, nonce);
+        let account_hash = crate::bridge::withdrawal_account_hash(recipient, asset_id, amount, nonce);
         let tree = self.withdrawals.lock().unwrap();
         let proof = crate::withdraw_smt::prove(&tree, &leaf);
         let root = crate::withdraw_smt::root(&tree);
@@ -650,10 +810,11 @@ impl RpcBackend for Node {
     fn withdrawal_proof(
         &self,
         recipient: &[u8; 32],
+        asset_id: &[u8; 32],
         amount: u64,
         nonce: u64,
     ) -> Result<(H256, zul_store::SmtProof), String> {
-        self.compute_withdrawal_proof(recipient, amount, nonce)
+        self.compute_withdrawal_proof(recipient, asset_id, amount, nonce)
             .map_err(|e| e.to_string())
     }
 
@@ -813,6 +974,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spl_deposit_mints_wrapped_token_spendable_via_svm() {
+        use zul_primitives::wrapped_spl as w;
+        let h = setup();
+        let l1_mint = Pubkey::new_unique();
+        let owner2 = Pubkey::new_unique();
+        let decimals = 6u8;
+
+        // Two SPL deposits of the same L1 mint: one to the (native-funded)
+        // payer, one to owner2 — so both associated token accounts exist.
+        h.node.enqueue_deposits(vec![
+            DepositEvent {
+                l1_signature: "splSig1".into(),
+                mint: Some(l1_mint),
+                decimals,
+                amount: 1_000_000,
+                l2_recipient: h.payer.pubkey(),
+            },
+            DepositEvent {
+                l1_signature: "splSig2".into(),
+                mint: Some(l1_mint),
+                decimals,
+                amount: 500_000,
+                l2_recipient: owner2,
+            },
+        ]);
+        h.node.try_produce_block().unwrap().expect("deposit block");
+
+        let wmint = w::wrapped_mint_address(&l1_mint);
+        let payer_ata = w::associated_token_address(&h.payer.pubkey(), &wmint);
+        let owner2_ata = w::associated_token_address(&owner2, &wmint);
+
+        // Wrapped mint + both ATAs were synthesized with the right state.
+        let mint_acc = h.node.store().get_account(&wmint).unwrap().unwrap();
+        assert_eq!(mint_acc.owner, w::TOKEN_PROGRAM_ID);
+        assert_eq!(w::mint_supply(&mint_acc.data), Some(1_500_000));
+        assert_eq!(w::mint_decimals(&mint_acc.data), Some(decimals));
+        let payer_tok = h.node.store().get_account(&payer_ata).unwrap().unwrap();
+        assert_eq!(w::token_account_amount(&payer_tok.data), Some(1_000_000));
+        assert_eq!(payer_tok.owner, w::TOKEN_PROGRAM_ID);
+
+        // Now SPEND it through the SVM: an SPL Token `TransferChecked` (tag 12)
+        // of 200_000 from the payer's ATA to owner2's ATA, signed by the payer.
+        // TransferChecked re-derives + checks the mint's decimals, so this also
+        // proves the synthesized *mint* account is byte-valid (not just the
+        // token accounts). If anything were malformed the program would reject.
+        let (_, blockhash) = h.node.latest_blockhash();
+        let mut data = vec![12u8];
+        data.extend_from_slice(&200_000u64.to_le_bytes());
+        data.push(decimals);
+        let ix = solana_sdk::instruction::Instruction {
+            program_id: w::TOKEN_PROGRAM_ID,
+            accounts: vec![
+                solana_sdk::instruction::AccountMeta::new(payer_ata, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(wmint, false),
+                solana_sdk::instruction::AccountMeta::new(owner2_ata, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(h.payer.pubkey(), true),
+            ],
+            data,
+        };
+        let tx = VersionedTransaction::from(
+            solana_sdk::transaction::Transaction::new_signed_with_payer(
+                &[ix],
+                Some(&h.payer.pubkey()),
+                &[&h.payer],
+                Hash::new_from_array(blockhash),
+            ),
+        );
+        h.node.submit_transaction(tx).await.unwrap();
+        h.node.try_produce_block().unwrap().expect("transfer block");
+
+        // The SVM moved wrapped-token balances between the synthesized accounts.
+        let payer_tok = h.node.store().get_account(&payer_ata).unwrap().unwrap();
+        let owner2_tok = h.node.store().get_account(&owner2_ata).unwrap().unwrap();
+        assert_eq!(w::token_account_amount(&payer_tok.data), Some(800_000));
+        assert_eq!(w::token_account_amount(&owner2_tok.data), Some(700_000));
+    }
+
+    #[tokio::test]
+    async fn spl_withdraw_burns_wrapped_token_and_commits_asset_bound_leaf() {
+        use zul_primitives::wrapped_spl as w;
+        let h = setup();
+        let l1_mint = Pubkey::new_unique();
+        let l1_recipient = [4u8; 32]; // where the tokens go on L1
+        let nonce = 1u64;
+
+        // Deposit 1_000_000 wrapped tokens to the payer.
+        h.node.enqueue_deposits(vec![DepositEvent {
+            l1_signature: "splSigW".into(),
+            mint: Some(l1_mint),
+            decimals: 6,
+            amount: 1_000_000,
+            l2_recipient: h.payer.pubkey(),
+        }]);
+        h.node.try_produce_block().unwrap().expect("deposit block");
+
+        // Withdraw 300_000 of it: SPL withdraw tx (80B) to the bridge program.
+        let (_, blockhash) = h.node.latest_blockhash();
+        let mut data = Vec::with_capacity(80);
+        data.extend_from_slice(&l1_recipient);
+        data.extend_from_slice(l1_mint.as_ref()); // asset id = L1 mint
+        data.extend_from_slice(&300_000u64.to_le_bytes());
+        data.extend_from_slice(&nonce.to_le_bytes());
+        let ix = solana_sdk::instruction::Instruction {
+            program_id: crate::bridge::BRIDGE_WITHDRAW_PROGRAM_ID,
+            accounts: vec![solana_sdk::instruction::AccountMeta::new(
+                h.payer.pubkey(),
+                true,
+            )],
+            data,
+        };
+        let tx = VersionedTransaction::from(
+            solana_sdk::transaction::Transaction::new_signed_with_payer(
+                &[ix],
+                Some(&h.payer.pubkey()),
+                &[&h.payer],
+                Hash::new_from_array(blockhash),
+            ),
+        );
+        h.node.submit_transaction(tx).await.unwrap();
+        h.node.try_produce_block().unwrap().expect("withdraw block");
+
+        // Wrapped balance + supply dropped by the withdrawn amount.
+        let wmint = w::wrapped_mint_address(&l1_mint);
+        let payer_ata = w::associated_token_address(&h.payer.pubkey(), &wmint);
+        let payer_tok = h.node.store().get_account(&payer_ata).unwrap().unwrap();
+        assert_eq!(w::token_account_amount(&payer_tok.data), Some(700_000));
+        let mint_acc = h.node.store().get_account(&wmint).unwrap().unwrap();
+        assert_eq!(w::mint_supply(&mint_acc.data), Some(700_000));
+
+        // The asset-bound withdrawal commitment is provable (claimable on L1).
+        let (_root, _proof) = h
+            .node
+            .compute_withdrawal_proof(&l1_recipient, &l1_mint.to_bytes(), 300_000, nonce)
+            .expect("asset-bound withdrawal proof");
+        // A native-asset proof for the same (recipient, nonce) must NOT exist.
+        assert!(h
+            .node
+            .compute_withdrawal_proof(&l1_recipient, &crate::bridge::NATIVE_ASSET_ID, 300_000, nonce)
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn submit_then_produce_block_and_query() {
         let h = setup();
         let recipient = Pubkey::new_unique();
@@ -857,6 +1160,7 @@ mod tests {
         let deposit = DepositEvent {
             l1_signature: "depositSig1".into(),
             mint: None,
+            decimals: 9,
             amount: 7 * ZUL,
             l2_recipient: recipient,
         };
@@ -920,14 +1224,21 @@ mod tests {
 
         // The node produces a settlement-valid inclusion proof for the
         // withdrawal commitment against the shallow withdrawals-tree root.
-        let (root, proof) = h.node.compute_withdrawal_proof(&recipient, amount, nonce).unwrap();
+        let native = crate::bridge::NATIVE_ASSET_ID;
+        let (root, proof) = h
+            .node
+            .compute_withdrawal_proof(&recipient, &native, amount, nonce)
+            .unwrap();
         assert_eq!(root, h.node.store().withdrawals_root().unwrap());
         let leaf = crate::bridge::withdrawal_pubkey(&recipient, nonce);
-        let account_hash = crate::bridge::withdrawal_account_hash(&recipient, amount, nonce);
+        let account_hash = crate::bridge::withdrawal_account_hash(&recipient, &native, amount, nonce);
         assert!(crate::withdraw_smt::verify(&root, &leaf, &account_hash, &proof));
 
         // A different (amount, nonce) is absent — no false proof.
-        assert!(h.node.compute_withdrawal_proof(&recipient, amount, 999).is_err());
+        assert!(h
+            .node
+            .compute_withdrawal_proof(&recipient, &native, amount, 999)
+            .is_err());
     }
 
     #[tokio::test]

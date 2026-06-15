@@ -69,6 +69,7 @@ pub trait RpcBackend: Send + Sync + 'static {
     fn withdrawal_proof(
         &self,
         recipient: &[u8; 32],
+        asset_id: &[u8; 32],
         amount: u64,
         nonce: u64,
     ) -> Result<(H256, SmtProof), String>;

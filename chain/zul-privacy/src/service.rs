@@ -17,7 +17,8 @@ use crate::instruction::{Asset, PoolInstruction};
 use crate::processor::{NoteEvent, NullifierSet, PoolEffect, PoolProcessor, ProofVerifier};
 use crate::state::PoolState;
 use zul_primitives::constants::LAMPORTS_PER_SIGNATURE;
-use zul_store::{StoredAccount, Store};
+use zul_primitives::wrapped_spl as w;
+use zul_store::{StoredAccount, Store, RENT_EXEMPT_RENT_EPOCH};
 use solana_sdk::pubkey::Pubkey;
 use std::collections::{HashMap, HashSet};
 
@@ -56,8 +57,6 @@ pub enum PoolServiceError {
     Pool(#[from] crate::processor::PoolError),
     #[error("insufficient funds for {0}")]
     InsufficientFunds(&'static str),
-    #[error("SPL pool effects require a token CPI (roadmap); rejected in v1")]
-    SplUnsupported,
 }
 
 /// Outcome of processing a block's pool transactions.
@@ -154,6 +153,9 @@ impl<V: ProofVerifier> PoolService<V> {
         };
         // Lamport overlay seeded with this block's SVM results.
         let mut overlay: HashMap<Pubkey, u64> = seed.clone();
+        // Wrapped-SPL token-account overlay (the evolving token states this
+        // block touches; assembled into account writes at the end).
+        let mut token_overlay: HashMap<Pubkey, StoredAccount> = HashMap::new();
         let mut state_dirty = false;
 
         for (fee_payer, instruction) in txs {
@@ -162,6 +164,7 @@ impl<V: ProofVerifier> PoolService<V> {
                 &mut state,
                 &mut nullifiers,
                 &mut overlay,
+                &mut token_overlay,
                 fee_payer,
                 instruction,
                 &mut result.note_events,
@@ -178,6 +181,10 @@ impl<V: ProofVerifier> PoolService<V> {
         for (pubkey, lamports) in overlay {
             let write = self.lamport_write(store, pubkey, lamports)?;
             result.account_writes.push((pubkey, write));
+        }
+        // Assemble wrapped-SPL token-account writes.
+        for (pubkey, account) in token_overlay {
+            result.account_writes.push((pubkey, Some(account)));
         }
         // Persist the pool state account if anything changed.
         if state_dirty {
@@ -204,22 +211,28 @@ impl<V: ProofVerifier> PoolService<V> {
         state: &mut PoolState,
         nullifiers: &mut BlockNullifiers,
         overlay: &mut HashMap<Pubkey, u64>,
+        token_overlay: &mut HashMap<Pubkey, StoredAccount>,
         fee_payer: &Pubkey,
         instruction: &PoolInstruction,
         note_events: &mut Vec<NoteEvent>,
     ) -> Result<(), PoolServiceError> {
-        // Reject unsupported SPL effects up front.
-        if instruction_uses_spl(instruction) {
-            return Err(PoolServiceError::SplUnsupported);
-        }
-
-        // Pre-check public funds so effect application cannot fail midway.
+        // Pre-check public funds so effect application cannot fail midway. The
+        // native per-tx fee is always paid in ZUL lamports; the shielded value
+        // is native lamports (Asset::Native) or a wrapped SPL token (Asset::Spl).
         let fee = self.config.flat_fee;
         match instruction {
-            PoolInstruction::Shield { amount, .. } => {
-                let need = amount.saturating_add(fee);
-                if self.balance(store, overlay, fee_payer) < need {
-                    return Err(PoolServiceError::InsufficientFunds("shield"));
+            PoolInstruction::Shield { asset, amount, .. } => {
+                let fee_need = match asset {
+                    Asset::Native => amount.saturating_add(fee),
+                    Asset::Spl(_) => fee,
+                };
+                if self.balance(store, overlay, fee_payer) < fee_need {
+                    return Err(PoolServiceError::InsufficientFunds("shield fee"));
+                }
+                if let Asset::Spl(mint) = asset {
+                    if self.token_balance(store, token_overlay, mint, fee_payer) < *amount {
+                        return Err(PoolServiceError::InsufficientFunds("shield token"));
+                    }
                 }
             }
             PoolInstruction::Transfer { fee: tfee, .. } => {
@@ -230,12 +243,23 @@ impl<V: ProofVerifier> PoolService<V> {
                     return Err(PoolServiceError::InsufficientFunds("pool fee"));
                 }
             }
-            PoolInstruction::Unshield { amount, .. } => {
+            PoolInstruction::Unshield { asset, amount, .. } => {
                 if self.balance(store, overlay, fee_payer) < fee {
                     return Err(PoolServiceError::InsufficientFunds("unshield fee"));
                 }
-                if self.balance(store, overlay, &self.config.vault) < *amount {
-                    return Err(PoolServiceError::InsufficientFunds("vault"));
+                match asset {
+                    Asset::Native => {
+                        if self.balance(store, overlay, &self.config.vault) < *amount {
+                            return Err(PoolServiceError::InsufficientFunds("vault"));
+                        }
+                    }
+                    Asset::Spl(mint) => {
+                        if self.token_balance(store, token_overlay, mint, &self.config.vault)
+                            < *amount
+                        {
+                            return Err(PoolServiceError::InsufficientFunds("vault token"));
+                        }
+                    }
                 }
             }
         }
@@ -247,15 +271,40 @@ impl<V: ProofVerifier> PoolService<V> {
         // Charge the per-tx fee to the collector.
         self.move_lamports(store, overlay, fee_payer, &self.config.fee_collector, fee);
 
-        // Apply value effects (native only — SPL rejected above).
+        // Apply value effects. Native moves lamports; SPL moves the wrapped
+        // token between the holder's ATA and the pool's per-mint vault ATA.
         for effect in outcome.effects {
             match effect {
-                PoolEffect::DepositToVault { amount, .. } => {
-                    self.move_lamports(store, overlay, fee_payer, &self.config.vault, amount);
-                }
-                PoolEffect::WithdrawFromVault { amount, recipient, .. } => {
-                    self.move_lamports(store, overlay, &self.config.vault, &recipient, amount);
-                }
+                PoolEffect::DepositToVault { asset, amount } => match asset {
+                    Asset::Native => {
+                        self.move_lamports(store, overlay, fee_payer, &self.config.vault, amount);
+                    }
+                    Asset::Spl(mint) => {
+                        self.move_wrapped(
+                            store,
+                            token_overlay,
+                            &mint,
+                            fee_payer,
+                            &self.config.vault,
+                            amount,
+                        );
+                    }
+                },
+                PoolEffect::WithdrawFromVault { asset, amount, recipient } => match asset {
+                    Asset::Native => {
+                        self.move_lamports(store, overlay, &self.config.vault, &recipient, amount);
+                    }
+                    Asset::Spl(mint) => {
+                        self.move_wrapped(
+                            store,
+                            token_overlay,
+                            &mint,
+                            &self.config.vault,
+                            &recipient,
+                            amount,
+                        );
+                    }
+                },
                 PoolEffect::PayFee { amount } => {
                     self.move_lamports(
                         store,
@@ -297,6 +346,77 @@ impl<V: ProofVerifier> PoolService<V> {
         overlay.insert(*to, to_bal.saturating_add(amount));
     }
 
+    /// Wrapped-token balance of `owner`'s ATA for `mint` (overlay then store).
+    fn token_balance(
+        &self,
+        store: &Store,
+        token_overlay: &HashMap<Pubkey, StoredAccount>,
+        mint: &[u8; 32],
+        owner: &Pubkey,
+    ) -> u64 {
+        let wmint = w::wrapped_mint_address(&Pubkey::new_from_array(*mint));
+        let ata = w::associated_token_address(owner, &wmint);
+        if let Some(acc) = token_overlay.get(&ata) {
+            return w::token_account_amount(&acc.data).unwrap_or(0);
+        }
+        store
+            .get_account(&ata)
+            .ok()
+            .flatten()
+            .and_then(|a| w::token_account_amount(&a.data))
+            .unwrap_or(0)
+    }
+
+    /// Load `owner`'s wrapped-token ATA for `wmint` (overlay, then store, then a
+    /// freshly synthesized empty rent-exempt account).
+    fn token_account(
+        &self,
+        store: &Store,
+        token_overlay: &HashMap<Pubkey, StoredAccount>,
+        wmint: &Pubkey,
+        owner: &Pubkey,
+    ) -> StoredAccount {
+        let ata = w::associated_token_address(owner, wmint);
+        if let Some(acc) = token_overlay.get(&ata) {
+            return acc.clone();
+        }
+        store.get_account(&ata).ok().flatten().unwrap_or_else(|| StoredAccount {
+            lamports: w::rent_exempt_lamports(w::ACCOUNT_LEN),
+            data: w::pack_token_account(wmint, owner, 0),
+            owner: w::TOKEN_PROGRAM_ID,
+            executable: false,
+            rent_epoch: RENT_EXEMPT_RENT_EPOCH,
+        })
+    }
+
+    /// Move `amount` of the wrapped token for `mint` from `from_owner`'s ATA to
+    /// `to_owner`'s ATA, creating either ATA on first touch. Total supply is
+    /// unchanged (the tokens are moved, not minted/burned).
+    fn move_wrapped(
+        &self,
+        store: &Store,
+        token_overlay: &mut HashMap<Pubkey, StoredAccount>,
+        mint: &[u8; 32],
+        from_owner: &Pubkey,
+        to_owner: &Pubkey,
+        amount: u64,
+    ) {
+        let wmint = w::wrapped_mint_address(&Pubkey::new_from_array(*mint));
+        let from_ata = w::associated_token_address(from_owner, &wmint);
+        let to_ata = w::associated_token_address(to_owner, &wmint);
+
+        let mut from = self.token_account(store, token_overlay, &wmint, from_owner);
+        let fb = w::token_account_amount(&from.data).unwrap_or(0);
+        w::set_token_account_amount(&mut from.data, fb.saturating_sub(amount));
+        token_overlay.insert(from_ata, from);
+
+        // Re-read in case from_ata == to_ata (degenerate self-move).
+        let mut to = self.token_account(store, token_overlay, &wmint, to_owner);
+        let tb = w::token_account_amount(&to.data).unwrap_or(0);
+        w::set_token_account_amount(&mut to.data, tb.saturating_add(amount));
+        token_overlay.insert(to_ata, to);
+    }
+
     /// Build the store write for an overlay balance, preserving non-lamport
     /// fields of any existing account.
     fn lamport_write(
@@ -317,15 +437,6 @@ impl<V: ProofVerifier> PoolService<V> {
             .unwrap_or_else(|| StoredAccount::new_system(0));
         account.lamports = lamports;
         Ok(Some(account))
-    }
-}
-
-fn instruction_uses_spl(instruction: &PoolInstruction) -> bool {
-    match instruction {
-        PoolInstruction::Shield { asset, .. } => matches!(asset, Asset::Spl(_)),
-        PoolInstruction::Unshield { asset, .. } => matches!(asset, Asset::Spl(_)),
-        // Transfers never move public asset value (only the native fee).
-        PoolInstruction::Transfer { .. } => false,
     }
 }
 
@@ -478,22 +589,112 @@ mod tests {
         assert!(result.nullifiers.is_empty());
     }
 
+    /// Commitment for an SPL note (asset id = the mint), for unshield change.
+    fn spl_commitment(mint: &[u8; 32], amount: u64, blinding: u64) -> [u8; 32] {
+        use crate::poseidon::asset_id_for_mint;
+        let pk = crate::poseidon::hash1(Fr::from(1u64));
+        let asset_id = asset_id_for_mint(&Pubkey::new_from_array(*mint));
+        fr_to_bytes(&note_commitment(asset_id, amount, pk, Fr::from(blinding)))
+    }
+
+    /// Seed a wrapped-token ATA into the store (stands in for a prior bridge
+    /// deposit) so the holder can shield it.
+    fn seed_wrapped(store: &Store, mint: &[u8; 32], owner: &Pubkey, amount: u64) {
+        let wmint = w::wrapped_mint_address(&Pubkey::new_from_array(*mint));
+        let ata = w::associated_token_address(owner, &wmint);
+        let account = StoredAccount {
+            lamports: w::rent_exempt_lamports(w::ACCOUNT_LEN),
+            data: w::pack_token_account(&wmint, owner, amount),
+            owner: w::TOKEN_PROGRAM_ID,
+            executable: false,
+            rent_epoch: RENT_EXEMPT_RENT_EPOCH,
+        };
+        let result = PoolBlockResult {
+            account_writes: vec![(ata, Some(account))],
+            ..Default::default()
+        };
+        commit(&result, store);
+    }
+
+    fn wrapped_balance(store: &Store, mint: &[u8; 32], owner: &Pubkey) -> u64 {
+        let wmint = w::wrapped_mint_address(&Pubkey::new_from_array(*mint));
+        let ata = w::associated_token_address(owner, &wmint);
+        store
+            .get_account(&ata)
+            .unwrap()
+            .and_then(|a| w::token_account_amount(&a.data))
+            .unwrap_or(0)
+    }
+
     #[test]
-    fn spl_shield_is_rejected_in_v1() {
+    fn spl_shield_and_unshield_move_wrapped_tokens_privately() {
+        let (_dir, store, user, cfg) = setup();
+        let service = PoolService::new(AcceptAll, cfg.clone());
+        let mint = [7u8; 32];
+
+        // The user already holds 1000 wrapped tokens (from a bridge deposit).
+        seed_wrapped(&store, &mint, &user.pubkey(), 1_000);
+
+        // Shield 600 of the SPL token: it moves into the pool's per-mint vault,
+        // the commitment enters the tree, and only the native FEE leaves the
+        // user's lamports (not the token amount).
+        let shield = PoolInstruction::Shield {
+            asset: Asset::Spl(mint),
+            amount: 600,
+            secret: native_secret(1),
+            encrypted_note: vec![0xab; 48],
+        };
+        let r0 = service.process_block(&store, &[(user.pubkey(), shield)]).unwrap();
+        assert_eq!(r0.statuses, vec![Ok(())]);
+        assert_eq!(r0.note_events.len(), 1);
+        commit(&r0, &store);
+
+        assert_eq!(wrapped_balance(&store, &mint, &user.pubkey()), 400);
+        assert_eq!(wrapped_balance(&store, &mint, &cfg.vault), 600);
+        // User paid only the native fee in ZUL, no token-as-lamports leak.
+        let user_lamports = store.get_account(&user.pubkey()).unwrap().unwrap().lamports;
+        assert_eq!(user_lamports, 100 * ZUL - LAMPORTS_PER_SIGNATURE);
+
+        // Unshield 400 of the SPL token to a fresh recipient.
+        let root = PoolState::from_bytes(
+            &store.get_account(&cfg.pool_state).unwrap().unwrap().data,
+        )
+        .unwrap()
+        .current_root();
+        let recipient = Pubkey::new_unique();
+        let unshield = PoolInstruction::Unshield {
+            proof: vec![0u8; 256],
+            root,
+            nullifier: field(0x55),
+            change_commitment: spl_commitment(&mint, 200, 7),
+            asset: Asset::Spl(mint),
+            amount: 400,
+            recipient: recipient.to_bytes(),
+            encrypted_change_note: vec![],
+        };
+        let r1 = service.process_block(&store, &[(user.pubkey(), unshield)]).unwrap();
+        assert_eq!(r1.statuses, vec![Ok(())]);
+        commit(&r1, &store);
+
+        // The vault released 400 wrapped tokens to the recipient's ATA.
+        assert_eq!(wrapped_balance(&store, &mint, &cfg.vault), 200);
+        assert_eq!(wrapped_balance(&store, &mint, &recipient), 400);
+    }
+
+    #[test]
+    fn spl_shield_rejected_without_wrapped_balance() {
         let (_dir, store, user, cfg) = setup();
         let service = PoolService::new(AcceptAll, cfg);
+        // No wrapped tokens seeded → shield must fail the token pre-check.
         let ix = PoolInstruction::Shield {
             asset: Asset::Spl([7u8; 32]),
-            amount: ZUL,
+            amount: 600,
             secret: native_secret(1),
             encrypted_note: vec![],
         };
         let result = service.process_block(&store, &[(user.pubkey(), ix)]).unwrap();
-        assert!(result.statuses[0]
-            .as_ref()
-            .err()
-            .unwrap()
-            .contains("SPL"));
+        assert!(result.statuses[0].as_ref().err().unwrap().contains("token"));
+        assert!(result.nullifiers.is_empty());
     }
 
     #[test]
