@@ -13,18 +13,24 @@ chain_name = "zul-mainnet-1"
 # Unix time in milliseconds the chain was created.
 creation_time_ms = 1760000000000
 # Native token: ZUL, 9 decimals (1 ZUL = 1_000_000_000 lamports).
-# ZUL is the gas token. On mainnet there is no faucet — see the note on gas
-# onboarding in docs/DEPLOY-MAINNET.md.
+#
+# GAS MODEL (decided 2026-06-16): ZUL has a FIXED 1,000,000,000-token supply
+# minted as an SPL on Solana mainnet (9 decimals, to match the L2 native unit).
+# The L2 native gas unit is that SPL, bridged 1:1 — gas exists ONLY by bridging
+# ZUL-SPL in (there is no faucet and no native pre-mine). SOL and every other
+# SPL bridge to *wrapped* L2 tokens (assets, not gas). The 1B cap is enforced
+# automatically: the bridge only credits native against ZUL-SPL actually locked
+# in the vault, and the L1 supply is fixed once its mint authority is revoked.
+# See docs/DEPLOY-MAINNET.md §Gas model.
 
 # Sequencer authority (block production + L2 system operations).
 sequencer = "E1qwDui9Muq3gfyGwdk1qZXnNyy2WzgHkESJGr4KwJpm"
 # All transaction fees accumulate here.
 fee_collector = "6PaVUAPQqyFWxYaLbnVaiwcAkDqiqjCvMMmFoGmNdCFM"
 
-# Initial ZUL allocations (lamports). No faucet allocation on mainnet.
-[[allocations]]
-# Operations / gas-onboarding reserve. The bridge authority draws native ZUL
-# from a reserve to credit gas for new deposits; size this for expected
-# onboarding (see docs/MAINNET-COST.md).
-pubkey = "9jhBSsexL7jmQraCz1knhxBGcEE4gTwrKmE5m8ivhLx"
-lamports = 500000000000000000
+# NO native pre-mine on mainnet: zero allocations. Every ZUL in circulation
+# originates from an L1 ZUL-SPL deposit, so native supply is always fully backed
+# 1:1 and never exceeds 1B. (Genesis still funds infra accounts — builtins,
+# sysvars, the pool-state account — with negligible rent lamports in code; those
+# are not user-claimable supply.) The chain is unusable until the ZUL-SPL mint
+# exists, the bridge `gas_mint` is configured, and some is bridged in.

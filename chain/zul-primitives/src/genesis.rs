@@ -40,6 +40,9 @@ pub struct GenesisConfig {
     pub sequencer: Pubkey,
     #[serde(with = "pubkey_b58")]
     pub fee_collector: Pubkey,
+    /// Empty on a zero-pre-mine chain (mainnet): all native supply originates
+    /// from bridged ZUL-SPL, so genesis allocates nothing.
+    #[serde(default)]
     pub allocations: Vec<Allocation>,
 }
 
@@ -64,11 +67,8 @@ impl GenesisConfig {
                 "chain_name must not be empty".into(),
             ));
         }
-        if self.allocations.is_empty() {
-            return Err(PrimitivesError::InvalidGenesis(
-                "at least one allocation is required".into(),
-            ));
-        }
+        // No lower bound on allocations: a zero-pre-mine chain (mainnet) has
+        // none, and its native supply is minted only against bridged ZUL-SPL.
         let mut seen = std::collections::HashSet::new();
         for a in &self.allocations {
             if a.lamports == 0 {
@@ -143,6 +143,21 @@ lamports = 500000000000000000
         assert_eq!(g.chain_name, "zul-test");
         assert_eq!(g.allocations.len(), 2);
         assert_eq!(g.total_supply(), Some(1_500_000_000_000_000_000));
+    }
+
+    #[test]
+    fn parses_zero_premine_genesis() {
+        // Mainnet has no [[allocations]] at all: zero native pre-mine, every
+        // ZUL minted only against bridged ZUL-SPL. It must parse and validate.
+        let toml = r#"
+chain_name = "zul-mainnet-1"
+creation_time_ms = 1781560621000
+sequencer = "E1qwDui9Muq3gfyGwdk1qZXnNyy2WzgHkESJGr4KwJpm"
+fee_collector = "6PaVUAPQqyFWxYaLbnVaiwcAkDqiqjCvMMmFoGmNdCFM"
+"#;
+        let g = GenesisConfig::from_toml_str(toml).unwrap();
+        assert!(g.allocations.is_empty());
+        assert_eq!(g.total_supply(), Some(0));
     }
 
     #[test]
