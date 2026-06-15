@@ -32,7 +32,14 @@ Outputs:
 
 ## Trust
 
-The setup here is a single-contributor (dev) ceremony with fixed entropy —
-fine for local nets and testnets. Before any value-bearing deployment,
-replace `scripts/setup.mjs` with a real multi-party ceremony and publish the
-transcript.
+`scripts/setup.mjs` is a single-contributor (dev) ceremony with fixed entropy —
+fine for local nets and testnets, but **forgeable**. For a value-bearing
+(mainnet) deployment, run the real multi-party ceremony instead:
+
+```sh
+npm run ceremony            # init | contribute | finalize (see the runbook)
+```
+
+`scripts/ceremony.mjs` uses a trusted Hermez phase-1, takes many independent
+phase-2 contributions, and closes with a public beacon + transcript
+verification. Full procedure: [docs/MAINNET-CEREMONY.md](../docs/MAINNET-CEREMONY.md).
