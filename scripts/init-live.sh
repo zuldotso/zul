@@ -26,14 +26,24 @@ esac
 # Per-network defaults.
 if [ "$NET" = "mainnet" ]; then
   CHAIN_NAME="${ZUL_CHAIN_NAME:-zul-mainnet-1}"
+  # Public default; pass the paid Helius URL via ZUL_L1_RPC_URL (keeps the API
+  # key out of git — it only lands in the gitignored config/mainnet/node.toml).
   L1_RPC_URL="${ZUL_L1_RPC_URL:-https://api.mainnet-beta.solana.com}"
   FAUCET_ENABLED=false
   BATCH_INTERVAL=600
+  # The live ZUL token (Token-2022, 9 decimals, ~1B fixed supply). Public.
+  GAS_MINT="${ZUL_GAS_MINT:-okTCeDRb7NeExmvf3RZxEs29i9nfw8Cd51oFVB4FZUL}"
+  # Mainnet program ids (vanity, end in ZUL). Deploy the `--features mainnet` build.
+  SETTLEMENT_ID="${ZUL_SETTLEMENT_ID:-Po6oySWHr9oxFWVhZJ1Jca2HkvfzXxsK91n3R6mqZUL}"
+  DA_LOG_ID="${ZUL_DA_LOG_ID:-by9fpRVSYN9ib7qwXJuak37d78cKUMFgNAWtjK3pZUL}"
 else
   CHAIN_NAME="${ZUL_CHAIN_NAME:-zul-testnet-1}"
   L1_RPC_URL="${ZUL_L1_RPC_URL:-https://api.devnet.solana.com}"
   FAUCET_ENABLED=true
   BATCH_INTERVAL=120
+  GAS_MINT="${ZUL_GAS_MINT:-}"
+  SETTLEMENT_ID="${ZUL_SETTLEMENT_ID:-}"
+  DA_LOG_ID="${ZUL_DA_LOG_ID:-}"
 fi
 
 # Native supply distribution (lamports; 1 ZUL = 1_000_000_000 lamports).
@@ -87,17 +97,21 @@ else
     echo "sequencer = \"$SEQUENCER\""
     echo "fee_collector = \"$FEE_COLLECTOR\""
     echo ""
-    if [ "$FAUCET_ENABLED" = true ]; then
+    if [ "$NET" = "mainnet" ]; then
+      # Zero native pre-mine: all ZUL originates from L1 ZUL-SPL deposits, so
+      # native supply is always 1:1-backed and capped at the 1B L1 supply.
+      echo "# No allocations: zero native pre-mine (gas is bridged ZUL-SPL only)."
+    else
       echo "[[allocations]]"
       echo "# Faucet pool (backs requestAirdrop)."
       echo "pubkey = \"$FAUCET\""
       echo "lamports = $FAUCET_LAMPORTS"
       echo ""
+      echo "[[allocations]]"
+      echo "# Operations reserve."
+      echo "pubkey = \"$OPS\""
+      echo "lamports = $OPS_LAMPORTS"
     fi
-    echo "[[allocations]]"
-    echo "# Operations / gas-onboarding reserve."
-    echo "pubkey = \"$OPS\""
-    echo "lamports = $OPS_LAMPORTS"
   } > "$CONFIG_DIR/genesis.toml"
 fi
 
@@ -112,9 +126,16 @@ echo "==> writing $CONFIG_DIR/node.toml"
   echo "slot_duration_ms = 500"
   echo ""
   echo "[rpc]"
-  echo "# 0.0.0.0 so wallets/explorer can reach it; lock down with ufw."
-  echo "http_addr = \"0.0.0.0:8899\""
-  echo "ws_addr = \"0.0.0.0:8900\""
+  if [ "$NET" = "mainnet" ]; then
+    echo "# Localhost only: the public endpoint is https://rpc-mainnet.zul.so,"
+    echo "# fronted by Caddy (deploy/Caddyfile.mainnet). Do NOT open 8899/8900."
+    echo "http_addr = \"127.0.0.1:8899\""
+    echo "ws_addr = \"127.0.0.1:8900\""
+  else
+    echo "# 0.0.0.0 so wallets/explorer can reach it; lock down with ufw."
+    echo "http_addr = \"0.0.0.0:8899\""
+    echo "ws_addr = \"0.0.0.0:8900\""
+  fi
   if [ "$FAUCET_ENABLED" = true ]; then
     echo "faucet_enabled = true"
     echo "faucet_max_lamports = 10000000000"
@@ -128,10 +149,14 @@ echo "==> writing $CONFIG_DIR/node.toml"
   echo "# Disabled until the Anchor programs are deployed and the authority funded."
   echo "enabled = false"
   echo "rpc_url = \"$L1_RPC_URL\""
-  echo "settlement_program_id = \"\""
-  echo "da_log_program_id = \"\""
+  echo "settlement_program_id = \"$SETTLEMENT_ID\""
+  echo "da_log_program_id = \"$DA_LOG_ID\""
   echo "bridge_authority_key_path = \"\""
   echo "batch_interval_slots = $BATCH_INTERVAL"
+  if [ "$NET" = "mainnet" ]; then
+    echo "# The live ZUL token; deposits of it credit native gas 1:1."
+  fi
+  echo "gas_mint = \"$GAS_MINT\""
 } > "$CONFIG_DIR/node.toml"
 
 # ---- pool verifying keys -> data/<net>/params ----------------------------
@@ -152,6 +177,7 @@ cat <<EOF
 $( [ "$FAUCET_ENABLED" = true ] && echo "  faucet        $FAUCET" )
   ops           $OPS
   l1.rpc_url    ${L1_RPC_URL%%\?*}$( [ "${L1_RPC_URL}" != "${L1_RPC_URL%%\?*}" ] && echo '?api-key=***' )
+$( [ -n "$GAS_MINT" ] && echo "  gas_mint      $GAS_MINT" )
 
 next:
   cd chain && cargo build --release -p zul-node

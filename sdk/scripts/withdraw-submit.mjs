@@ -1,7 +1,12 @@
-// Submit an L2 bridge-withdraw transaction: burns the withdrawer's L2 ZUL and
-// commits a withdrawal leaf claimable on L1 via zul-l1-claim.
+// Submit an L2 bridge-withdraw transaction: burns the withdrawer's L2 balance
+// and commits a withdrawal leaf claimable on L1 via zul-l1-claim.
 //
+//   # native ZUL withdrawal (48-byte data)
 //   WITHDRAWER=<keypair.json> RECIPIENT=<L1 pubkey> AMOUNT=<lamports> NONCE=<n> \
+//     node sdk/scripts/withdraw-submit.mjs
+//   # SPL withdrawal (80-byte data; ASSET = the L1 mint = asset id): burns the
+//   # wrapped token and lets zul-l1-claim --asset release the original on L1
+//   ASSET=<L1 mint> WITHDRAWER=... RECIPIENT=... AMOUNT=<token units> NONCE=<n> \
 //     node sdk/scripts/withdraw-submit.mjs
 
 import {
@@ -28,6 +33,8 @@ const withdrawer = Keypair.fromSecretKey(
 const recipient = new PublicKey(process.env.RECIPIENT);
 const amount = BigInt(process.env.AMOUNT);
 const nonce = BigInt(process.env.NONCE);
+// Optional: the L1 mint (asset id) for an SPL withdrawal. Omitted = native ZUL.
+const asset = process.env.ASSET ? new PublicKey(process.env.ASSET) : null;
 
 function le64(n) {
   const b = Buffer.alloc(8);
@@ -36,8 +43,18 @@ function le64(n) {
 }
 
 async function main() {
-  console.log(`withdraw ${amount} -> L1 ${recipient.toBase58()} (nonce ${nonce})`);
-  const data = Buffer.concat([Buffer.from(recipient.toBytes()), le64(amount), le64(nonce)]);
+  console.log(
+    `withdraw ${amount}${asset ? " of SPL " + asset.toBase58() : " lamports"} -> L1 ${recipient.toBase58()} (nonce ${nonce})`,
+  );
+  // native: recipient(32) amount(8) nonce(8); SPL: recipient(32) asset(32) amount(8) nonce(8)
+  const data = asset
+    ? Buffer.concat([
+        Buffer.from(recipient.toBytes()),
+        Buffer.from(asset.toBytes()),
+        le64(amount),
+        le64(nonce),
+      ])
+    : Buffer.concat([Buffer.from(recipient.toBytes()), le64(amount), le64(nonce)]);
   const ix = new TransactionInstruction({
     programId: WITHDRAW_PROGRAM,
     keys: [{ pubkey: withdrawer.publicKey, isSigner: true, isWritable: true }],

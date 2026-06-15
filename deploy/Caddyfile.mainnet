@@ -1,0 +1,48 @@
+# Zul mainnet L2 RPC — public TLS endpoint for rpc-mainnet.zul.so.
+#
+# The node binds 127.0.0.1:8899 (JSON-RPC) and 127.0.0.1:8900 (PubSub
+# websocket); Caddy fronts both on one domain with automatic HTTPS, and adds
+# CORS so browser wallets/explorer on other origins can call it (the node
+# itself sends no CORS headers). Wallets and the explorer talk to
+# https://rpc-mainnet.zul.so only — 8899/8900 stay on localhost.
+#
+# Setup on the mainnet box:
+#   1. DNS: A record  rpc-mainnet.zul.so -> this box's public IP.
+#   2. ufw allow 80,443/tcp   (Caddy needs them; do NOT open 8899/8900).
+#   3. install Caddy, put this file at /etc/caddy/Caddyfile, reload:
+#        sudo cp deploy/Caddyfile.mainnet /etc/caddy/Caddyfile
+#        sudo systemctl reload caddy
+
+rpc-mainnet.zul.so {
+	encode gzip
+
+	# CORS preflight: a browser sends an OPTIONS preflight before the JSON-RPC
+	# POST (custom content-type / solana-client header). Answer it here — the
+	# node returns 405 for OPTIONS and sets no CORS headers.
+	@preflight method OPTIONS
+	handle @preflight {
+		header Access-Control-Allow-Origin "*"
+		header Access-Control-Allow-Methods "GET, POST, OPTIONS"
+		header Access-Control-Allow-Headers "Content-Type, solana-client"
+		header Access-Control-Max-Age "86400"
+		respond 204
+	}
+
+	# PubSub websocket (subscriptions) -> the ws server on 8900. solana web3.js
+	# derives wss://<same-host> (port 443), so upgrades arrive on this vhost.
+	@ws {
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+	handle @ws {
+		reverse_proxy 127.0.0.1:8900
+	}
+
+	# JSON-RPC -> 8899, with CORS on the response so browsers can read it.
+	handle {
+		header Access-Control-Allow-Origin "*"
+		header Access-Control-Allow-Methods "GET, POST, OPTIONS"
+		header Access-Control-Allow-Headers "Content-Type, solana-client"
+		reverse_proxy 127.0.0.1:8899
+	}
+}
