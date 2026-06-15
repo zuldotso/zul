@@ -16,9 +16,13 @@
 
 A real Layer 2 chain that settles to Solana: own block production (single PoA
 sequencer), real SVM execution via Agave's `solana-svm`, native gas token `ZUL`,
-and a multi-asset zk shielded pool (ZUL + bridged SOL).
+and a multi-asset zk shielded pool. The bridge accepts **native SOL and any SPL
+token** (each L1 mint becomes a deterministic L2 wrapped token), in **both
+directions** (deposit + withdraw), and bridged assets can be **shielded
+privately** in the pool — not just held transparently.
 
-See [docs/PLAN.md](docs/PLAN.md) for the full implementation plan and trust model.
+See [docs/PLAN.md](docs/PLAN.md) for the implementation plan and trust model, and
+[docs/DEPLOY-MAINNET.md](docs/DEPLOY-MAINNET.md) for the mainnet runbook.
 
 ## Layout
 
@@ -45,12 +49,15 @@ docs/         plan and protocol notes
 # chain node (Rust)
 cd chain
 cargo test                  # unit + integration tests
-cargo run -p zul-node -- --config ../config/node.example.toml
+cargo run -p zul-node -- --config ../config/testnet/node.example.toml
 
 # web stack (TypeScript)
 pnpm install
 pnpm -r build
 ```
 
-Keys, RPC endpoints, and SSH material are intentionally absent from this repo;
-copy `config/node.example.toml` and `.env.example` files and fill them locally.
+Config is per-network: `config/testnet/` (settles to Solana devnet) and
+`config/mainnet/` (settles to mainnet-beta; no faucet). Only the
+`*.example.toml` templates are committed — generate live keys/genesis/config
+with `ZUL_NET=testnet|mainnet ./scripts/init-live.sh`. Keys, RPC endpoints, and
+SSH material are intentionally absent from this repo.

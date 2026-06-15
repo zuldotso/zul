@@ -2,6 +2,27 @@
 
 Implementation plan + build status.
 
+## Update (2026-06-16)
+
+Since the original plan below, three things changed materially (the plan text
+is kept for context but read these first where they differ):
+
+1. **Renamed PL2 → Zul** and relaunched a fresh chain (devnet + OVH).
+2. **Bridge generalized to arbitrary SPL, bidirectional.** Not just SOL/wSOL:
+   any L1 SPL mint (Token or Token-2022) bridges to a deterministic L2 *wrapped*
+   token, deposit **and** withdraw. The withdrawal commitment now binds an
+   `asset_id` so the L1 claim releases the right asset. See §4.2.
+3. **Bridged SPL can be shielded privately.** The shielded pool was native-only
+   in the first cut; it now moves wrapped SPL in/out of a per-mint pool vault, so
+   shield / private transfer / unshield work for any bridged asset (§4.3, §6).
+
+A parallel **mainnet** system was also added (per-network `config/{testnet,
+mainnet}/`, settling to mainnet-beta). Mainnet runbook + the value-bearing
+launch blockers (real MPC ceremony, key custody, cost) live in
+`DEPLOY-MAINNET.md`, `MAINNET-CEREMONY.md`, `MAINNET-CUSTODY.md`,
+`MAINNET-COST.md`. Chain workspace is now ~117 Rust tests (125 incl. the L1
+program).
+
 ## Build status (2026-06-10)
 
 All components scaffolded and unit/integration-tested locally. Runtime
@@ -34,7 +55,8 @@ Cross-language bindings proven (the parts most likely to silently drift):
 
 Deferred to on-server / devnet (needs real keys): full pool transfer/unshield
 runtime with browser-generated proofs; settlement/bridge against devnet;
-multi-batch DA reconstruction; SPL (wSOL) pool value path (token CPI).
+multi-batch DA reconstruction. *(The SPL pool value path, once listed here, is
+done — see the 2026-06-16 update above.)*
 
 ## 1. Goal
 
@@ -45,8 +67,9 @@ A real Layer 2 chain that settles to Solana:
   Token-2022, user-deployed BPF programs)
 - Native gas token `ZUL`: the chain's lamport unit. SOL does not exist natively on the L2;
   all fees are paid in ZUL
-- Privacy: zk shielded pool for ZUL and bridged SOL (shield / private transfer /
-  unshield), enshrined as a builtin program in the node
+- Privacy: zk shielded pool for ZUL and any bridged asset — native SOL and
+  arbitrary SPL tokens (shield / private transfer / unshield), enshrined as a
+  builtin program in the node
 - Settlement and bridge: Anchor programs on Solana (devnet first), optimistic model
 - Data availability: compressed batch data logged to the Solana ledger
 - Own explorer: Next.js 16 + Prisma 6 + PostgreSQL, fed by a dedicated indexer
@@ -68,7 +91,7 @@ A real Layer 2 chain that settles to Solana:
 | 3 | State commitment | Sparse Merkle tree over (pubkey → account hash), blake3; root in every block header | SVM has no native state trie — every SVM rollup must fill this gap itself. Lattice hash rejected: no inclusion proofs for withdrawals |
 | 4 | Settlement | Optimistic, Stage 0: sequencer posts batch records (state root + DA hash); challenge window is procedural, not yet enforced by on-chain re-execution | On-chain SVM fraud proofs are out of v1 scope; trust model disclosed in §5 |
 | 5 | Data availability | Batch tx data zstd-compressed, chunked into noop-log instructions on Solana; hash anchored in the settlement record | Cheapest way to make data public; the node also serves batches over RPC |
-| 6 | Privacy | UTXO shielded pool, multi-asset (ZUL + wSOL): notes carry an asset id; Poseidon note commitments, nullifiers, Merkle tree; Groth16 over BN254; circuits in circom 2; proving via snarkjs WASM in the browser; verifying natively in the node via arkworks | Verification is native — our chain, no syscall/CU budget. Rejected: Token-2022 confidential transfer (hides amounts only, not graph); Aztec-style private compute (research-team scale) |
+| 6 | Privacy | UTXO shielded pool, multi-asset (native ZUL + any bridged SPL): notes carry an asset id; Poseidon note commitments, nullifiers, Merkle tree; Groth16 over BN254; circuits in circom 2; proving via snarkjs WASM in the browser; verifying natively in the node via arkworks | Verification is native — our chain, no syscall/CU budget. Rejected: Token-2022 confidential transfer (hides amounts only, not graph); Aztec-style private compute (research-team scale) |
 | 7 | Private tx fees | v1: public fee payer (linkability caveat documented). v2: relayer with in-circuit fee output | Simplicity first |
 | 8 | RPC | Solana JSON-RPC subset (HTTP + WebSocket) | `@solana/web3.js`, wallet-adapter, and the `solana` CLI work against the L2 unchanged — huge leverage |
 | 9 | Explorer | Next.js 16 + Prisma 6 + Postgres + separate TS indexer worker | Per global stack rules; deployed on Railway |
@@ -114,7 +137,8 @@ A real Layer 2 chain that settles to Solana:
   subscriptions
 - `privacy` — shielded pool builtin program: instruction parsing, Groth16 verification
   (ark-groth16 / ark-bn254), Poseidon hashing (light-poseidon), commitment Merkle tree
-  (depth 26), nullifier set; pool vaults for native ZUL (lamports) and SPL assets (wSOL)
+  (depth 26), nullifier set; a native-ZUL lamport vault and a per-mint wrapped-SPL vault
+  ATA (shield/unshield move the wrapped token in/out of it)
 - `bridge` — L1 deposit watcher (deposit events → L2 mint txs) and batcher (posts state
   roots + DA chunks via the settlement program)
 
@@ -127,19 +151,28 @@ Blocks are produced every slot locally; only non-empty data is batched to L1.
 ### 4.2 `programs/` — Solana L1 programs (Anchor)
 
 - `settlement` — sequencer authority; batch records `{batch_no, l2_block_range,
-  state_root, da_hash}`; withdrawal claims verified against posted SMT roots; challenge
-  window (procedural in v1)
-- Bridge instructions — deposit SOL / SPL into vault PDA (memo carries L2 recipient);
-  claim withdrawal with SMT inclusion proof; SPL-ZUL mint on L1 (mint authority = bridge
-  PDA) for ZUL exits
+  state_root, withdrawals_root, da_hash}`; withdrawal claims verified against the posted
+  shallow withdrawals-tree root (depth-32 SMT); challenge window (procedural in v1)
+- Bridge instructions:
+  - `deposit_sol(amount, l2_recipient)` — SOL into the vault PDA
+  - `deposit_spl(amount, l2_recipient)` — any SPL token (Token or Token-2022) into a
+    per-mint vault ATA via a checked token transfer; the `Deposited` event carries the
+    mint + decimals so the L2 mints the matching wrapped token
+  - `claim_withdrawal` / `claim_withdrawal_spl` — release SOL / the SPL token from the
+    vault against an inclusion proof. The withdrawal commitment binds an `asset_id`
+    (`[0u8;32]` for native, the L1 mint for SPL), so the claim can only release the asset
+    the L2 actually burned
 - `da_log` — noop-style program; instruction data carries zstd batch chunks
 
 Asset mapping:
 
-- ZUL — native on L2. Exit → L1 bridge mints SPL-ZUL; deposit SPL-ZUL → burned on L1,
-  credited as native lamports on L2
-- SOL — deposit → vault; L2 mints a wrapped-SOL SPL token (L2 bridge mint authority);
-  withdrawal is the reverse with a claim proof
+- ZUL — native on L2 (gas). SOL deposit → native ZUL lamports 1:1; that is also how a
+  user funds gas (there is no faucet on mainnet)
+- Any SPL token — deposit → locked in the per-mint L1 vault ATA; the L2 credits a
+  deterministic *wrapped* SPL token (classic Token program, address derived from the L1
+  mint, decimals copied). Withdraw burns the wrapped token on L2 and releases the
+  original from the vault on claim. The wrapped mint's authority is a keyless reserved
+  pubkey, so wrapped supply can only grow through a real deposit, never an SVM `MintTo`
 
 ### 4.3 `circuits/` — circom 2
 
@@ -234,9 +267,9 @@ chunking, explorer bridge / rollup-status pages.
 ### Phase 4 — Privacy (1.5–2 weeks)
 Circuits + setup scripts, shielded pool builtin in the node, SDK note management + WASM
 proving, explorer shielded stats, end-to-end flows.
-- Check: shield → private transfer (A→B) → unshield round-trip passes for both ZUL and
-  wSOL on a local net; double-spend and invalid-proof transactions are rejected, with
-  tests proving it
+- Check: shield → private transfer (A→B) → unshield round-trip passes for native ZUL
+  and for a bridged SPL token; double-spend and invalid-proof transactions are rejected,
+  with tests proving it
 
 ### Phase 5 — Deploy + polish (3–5 days)
 Node as a systemd service (or Docker) on the OVHcloud server — firewalled RPC ports,
@@ -247,8 +280,9 @@ smoke script.
   machine
 
 ### Phase 6 — Roadmap (not v1)
-Relayer for private fees, enforced fraud proofs, sequencer set, generalized token
-bridge, encrypted mempool.
+Relayer for private fees, enforced fraud proofs, sequencer set, encrypted mempool.
+*(The generalized token bridge, once a roadmap item, shipped — see the 2026-06-16
+update. Mainnet bring-up is tracked in `DEPLOY-MAINNET.md`.)*
 
 ## 8. Risks
 
@@ -266,7 +300,8 @@ bridge, encrypted mempool.
 Confirmed 2026-06-10:
 
 1. Execution engine: real SVM via `solana-svm`
-2. Shielded pool covers both ZUL (native) and bridged SOL (wSOL) from v1
+2. Shielded pool covers native ZUL and any bridged asset (native SOL + arbitrary
+   SPL tokens); the first cut shipped native-only and SPL landed 2026-06-16
 3. Sequencer node is developed, built, and hosted on the user's OVHcloud server;
    explorer / indexer / Postgres deploy to Railway
 4. Token `ZUL`, 9 decimals (working default — can rename any time before genesis)

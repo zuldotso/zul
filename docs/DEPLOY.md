@@ -84,6 +84,14 @@ can fetch them to generate proofs in the browser.
 
 ## Tier 3 — devnet settlement + bridge
 
+> **Redeploy required (consensus change).** The withdrawal commitment now binds
+> an `asset_id` (for the arbitrary-SPL bridge), so the settlement program's
+> withdrawal hash changed. **A previously-deployed devnet settlement program is
+> incompatible** — native *and* SPL withdrawal claims will fail against the
+> updated node until you `cargo-build-sbf` + redeploy the settlement program and
+> update `settlement_program_id`. Deposits/batches are unaffected; only the
+> withdraw→claim path needs the matching program.
+
 ```sh
 # deploy wallet with devnet SOL
 solana-keygen new -o ~/.config/solana/id.json

@@ -81,3 +81,41 @@ devnet (deposit: 0.05 SOL → L2; withdraw: L2 5M burned → **L1 received 5,000
   state root); restored to 10s once the depth-32 tree removed that constraint.
 - Pending external input: a domain (RPC TLS/proxy), an off-box backup target, an
   upgrade-authority multisig. Remaining axis: privacy (denominations + relayer).
+
+## 2026-06-16 — arbitrary-SPL bridge (both ways), private SPL, mainnet prep
+
+Extended the bridge from SOL-only to **any SPL token, bidirectional**, made
+bridged SPL **shieldable in the pool**, and added a parallel **mainnet** system.
+
+1. **Withdrawal commitment binds `asset_id`** (consensus change, both sides):
+   `withdrawal_account_hash(recipient, asset_id, amount, nonce)` — native uses
+   `[0u8;32]`, SPL uses the L1 mint. Cross-pinned node ↔ settlement `smt.rs`
+   (new vector `29002aa0…`). L2 withdraw wire: native 48 B (unchanged), SPL 80 B.
+2. **Settlement `deposit_spl` + `claim_withdrawal_spl`** (added `anchor-spl`,
+   `init-if-needed`): checked token transfer into / out of a per-mint vault ATA;
+   `Deposited` event gained `mint` + `decimals`. `.so` 309 KB → 401 KB.
+3. **Node wrapped SPL** (`zul-primitives::wrapped_spl`): each L1 mint →
+   deterministic L2 wrapped mint (classic Token program), authority a **keyless**
+   reserved pubkey (no SVM `MintTo` possible). Deposit synthesizes mint+ATA and
+   credits; withdraw burns. Proven spendable by a `TransferChecked` round-trip
+   through the SVM in-test.
+4. **Private SPL in the pool** — `service.rs` no longer rejects SPL; effects
+   branch on asset and move the wrapped token between the holder's ATA and a
+   per-mint pool vault ATA (new token overlay). Circuits were already
+   asset-generic, so **no circuit change**. Shield→unshield SPL round-trip tested.
+5. **Mainnet system** — per-network `config/{testnet,mainnet}/`, a `network`
+   field that forbids the faucet on mainnet, `ZUL_NET`-aware `init-live.sh`, a
+   `zul-node@.service` instance unit, and runbook/cost/custody/ceremony docs.
+6. **Ops bins** — `zul-l1-deposit --asset <mint>` and `zul-l1-claim --asset`
+   (+`--token-2022`) for the SPL bridge round-trip on devnet/mainnet.
+
+Tests: chain ~117 + settlement 8 = **125 green**.
+
+### Caveats / follow-ons
+- **Existing testnet/devnet settlement is now hash-incompatible** (the `asset_id`
+  change): redeploy it or withdraw→claim breaks there. Flagged in `DEPLOY.md`.
+- **`deposit_spl` / `claim_withdrawal_spl` are not yet executed on-chain** —
+  cargo-build-sbf + eyeballed account order only. Prove them on devnet via the
+  ops bins (needs a funded key) before mainnet.
+- Wrapped token-account rent is minted from native supply (Stage-0, documented
+  in `MAINNET-COST.md`).
