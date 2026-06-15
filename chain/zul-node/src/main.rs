@@ -107,6 +107,7 @@ async fn run() -> anyhow::Result<()> {
     let config = NodeConfig::load(&config_path)?;
     let genesis = GenesisConfig::load(&config.node.genesis_path)?;
     tracing::info!(
+        network = %config.node.network,
         chain = genesis.chain_name,
         genesis_hash = hash::to_base58(&genesis.genesis_hash()),
         "loading ZUL node"

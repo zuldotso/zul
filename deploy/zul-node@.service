@@ -1,0 +1,32 @@
+# Zul sequencer node — templated systemd unit, one instance per network.
+# The instance name (%i) selects the network: testnet or mainnet. This lets a
+# single host run either (or, on separate hosts, the same unit everywhere).
+#
+# Install: sudo cp deploy/zul-node@.service /etc/systemd/system/
+#          (edit User / WorkingDirectory below to match your checkout)
+#          sudo systemctl daemon-reload
+#          sudo systemctl enable --now zul-node@mainnet
+# Logs:    journalctl -u zul-node@mainnet -f
+
+[Unit]
+Description=Zul privacy Layer 2 sequencer (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zul
+WorkingDirectory=/home/zul/ZUL
+ExecStart=/home/zul/ZUL/chain/target/release/zul-node --config /home/zul/ZUL/config/%i/node.toml
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+# The sequencer is the single writer; give it generous file handles.
+LimitNOFILE=1000000
+# Light hardening.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target

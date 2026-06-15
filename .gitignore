@@ -24,6 +24,11 @@ config/node.toml
 config/genesis.toml
 config/secrets.env
 config/*.local.toml
+# Per-network live config (testnet/, mainnet/) — only the templates above
+# (config/<net>/*.example.toml) are committed.
+config/*/node.toml
+config/*/genesis.toml
+config/*/secrets.env
 
 # Runtime data
 data/

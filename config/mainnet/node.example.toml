@@ -1,0 +1,33 @@
+# Zul node configuration template — MAINNET.
+# Copy to config/mainnet/node.toml and adjust; the live node.toml must never
+# be committed (it references real key material). Settles to Solana
+# mainnet-beta, so the bridge authority spends real SOL — see
+# docs/MAINNET-COST.md before enabling [l1].
+
+[node]
+network = "mainnet"
+data_dir = "./data/mainnet"
+genesis_path = "./config/mainnet/genesis.toml"
+sequencer_key_path = "./keys/mainnet/sequencer.json"
+slot_duration_ms = 500
+
+[rpc]
+http_addr = "127.0.0.1:8899"
+ws_addr = "127.0.0.1:8900"
+# No faucet on mainnet: ZUL is real gas. init-live.sh forces this off for
+# ZUL_NET=mainnet regardless of what is written here.
+faucet_enabled = false
+
+[l1]
+# Settlement/bridge against Solana mainnet-beta. Enable only after the
+# settlement + da_log programs are deployed to mainnet and the bridge
+# authority is funded (real SOL). Use a paid RPC (public mainnet-beta is
+# rate-limited); pass it via ZUL_L1_RPC_URL so the API key never lands in git.
+enabled = false
+rpc_url = "https://api.mainnet-beta.solana.com"
+settlement_program_id = ""
+da_log_program_id = ""
+bridge_authority_key_path = ""
+# Larger interval than testnet: each batch costs real SOL (fee + rent).
+# Tune against docs/MAINNET-COST.md.
+batch_interval_slots = 600

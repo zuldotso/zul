@@ -1,12 +1,12 @@
-# Zul genesis specification (example / local development).
+# Zul genesis specification — TESTNET (example).
 # The blake3 hash of the canonical encoding of this content is the chain's
 # genesis hash and serves as the chain identifier.
 #
-# The pubkeys below are throwaway examples. For a runnable local chain,
-# generate your own keys (scripts/init-local) so you hold the matching
-# private keys for the sequencer and faucet accounts.
+# The pubkeys below are throwaway examples. For a runnable chain, generate
+# your own keys (scripts/init-live.sh ZUL_NET=testnet) so you hold the
+# matching private keys for the sequencer and faucet accounts.
 
-chain_name = "zul-local"
+chain_name = "zul-testnet-1"
 # Unix time in milliseconds the chain was created.
 creation_time_ms = 1760000000000
 # Native token: ZUL, 9 decimals (1 ZUL = 1_000_000_000 lamports).
@@ -18,7 +18,7 @@ fee_collector = "6PaVUAPQqyFWxYaLbnVaiwcAkDqiqjCvMMmFoGmNdCFM"
 
 # Initial ZUL allocations (lamports).
 [[allocations]]
-# Faucet pool — backs requestAirdrop on local/dev deployments.
+# Faucet pool — backs requestAirdrop on the testnet.
 pubkey = "Hvd9JUwyRzdm7m7yRcSQBphQtpPNWf5GmCEZRKoWJGSp"
 lamports = 1000000000000000000
 

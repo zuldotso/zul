@@ -1,0 +1,30 @@
+# Zul genesis specification — MAINNET (example).
+# The blake3 hash of the canonical encoding of this content is the chain's
+# genesis hash and serves as the chain identifier. A mainnet launch writes
+# this ONCE; changing it afterwards forks the chain identity.
+#
+# The pubkeys below are throwaway examples. The live mainnet genesis is
+# generated on the server by scripts/init-live.sh ZUL_NET=mainnet, which
+# fills in keys you actually hold. For a value-bearing launch the sequencer,
+# fee_collector and ops keys should be custodied behind a multisig
+# (see docs/MAINNET-CUSTODY.md).
+
+chain_name = "zul-mainnet-1"
+# Unix time in milliseconds the chain was created.
+creation_time_ms = 1760000000000
+# Native token: ZUL, 9 decimals (1 ZUL = 1_000_000_000 lamports).
+# ZUL is the gas token. On mainnet there is no faucet — see the note on gas
+# onboarding in docs/DEPLOY-MAINNET.md.
+
+# Sequencer authority (block production + L2 system operations).
+sequencer = "E1qwDui9Muq3gfyGwdk1qZXnNyy2WzgHkESJGr4KwJpm"
+# All transaction fees accumulate here.
+fee_collector = "6PaVUAPQqyFWxYaLbnVaiwcAkDqiqjCvMMmFoGmNdCFM"
+
+# Initial ZUL allocations (lamports). No faucet allocation on mainnet.
+[[allocations]]
+# Operations / gas-onboarding reserve. The bridge authority draws native ZUL
+# from a reserve to credit gas for new deposits; size this for expected
+# onboarding (see docs/MAINNET-COST.md).
+pubkey = "9jhBSsexL7jmQraCz1knhxBGcEE4gTwrKmE5m8ivhLx"
+lamports = 500000000000000000

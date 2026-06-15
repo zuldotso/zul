@@ -15,8 +15,31 @@ pub struct NodeConfig {
     pub l1: L1Section,
 }
 
+/// Which deployment a node belongs to. Settlement target and operational
+/// defaults differ; mainnet additionally forbids the built-in faucet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Network {
+    #[default]
+    Testnet,
+    Mainnet,
+}
+
+impl std::fmt::Display for Network {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Network::Testnet => "testnet",
+            Network::Mainnet => "mainnet",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeSection {
+    /// Deployment this node serves. Defaults to testnet so existing configs
+    /// keep working; mainnet must be opted into explicitly.
+    #[serde(default)]
+    pub network: Network,
     pub data_dir: PathBuf,
     pub genesis_path: PathBuf,
     pub sequencer_key_path: PathBuf,
@@ -133,6 +156,11 @@ impl NodeConfig {
                 "faucet_enabled requires faucet_key_path".into(),
             ));
         }
+        if self.node.network == Network::Mainnet && self.rpc.faucet_enabled {
+            return Err(PrimitivesError::InvalidConfig(
+                "mainnet must not enable the faucet (ZUL is real gas)".into(),
+            ));
+        }
         if self.l1.enabled {
             if self.l1.rpc_url.is_empty() {
                 return Err(PrimitivesError::InvalidConfig(
@@ -185,5 +213,18 @@ faucet_key_path = "./keys/faucet.json"
     fn l1_enabled_requires_endpoints() {
         let with_l1 = format!("{EXAMPLE}\n[l1]\nenabled = true\n");
         assert!(NodeConfig::from_toml_str(&with_l1).is_err());
+    }
+
+    #[test]
+    fn network_defaults_to_testnet() {
+        let cfg = NodeConfig::from_toml_str(EXAMPLE).unwrap();
+        assert_eq!(cfg.node.network, Network::Testnet);
+    }
+
+    #[test]
+    fn mainnet_forbids_faucet() {
+        let mainnet = EXAMPLE.replace("[node]", "[node]\nnetwork = \"mainnet\"");
+        // EXAMPLE enables the faucet, which is illegal on mainnet.
+        assert!(NodeConfig::from_toml_str(&mainnet).is_err());
     }
 }
