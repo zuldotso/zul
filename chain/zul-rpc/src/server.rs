@@ -369,7 +369,17 @@ pub fn build_module<B: RpcBackend>(backend: Arc<B>, faucet_enabled: bool) -> Rpc
                 if Some(*sig) == until_sig {
                     break;
                 }
-                out.push(encode::signature_entry(sig, *slot, None));
+                // Report the tx's execution error (same shape as getTransaction's
+                // meta.err) so clients can tell failed txs from successful ones
+                // without a getTransaction per signature.
+                let err = ctx
+                    .store()
+                    .get_transaction(sig)
+                    .ok()
+                    .flatten()
+                    .map(|(_, _, meta)| encode::status_to_json(&meta.status))
+                    .filter(|v| !v.is_null());
+                out.push(encode::signature_entry(sig, *slot, err));
             }
             Ok::<_, ErrorObjectOwned>(json!(out))
         })
