@@ -1,0 +1,18 @@
+# Zul mainnet redb snapshot (oneshot, driven by zul-backup.timer).
+# Local rotated snapshots by default. For real disaster recovery, set
+# ZUL_BACKUP_REMOTE to an rclone remote (e.g. b2:zul-backups) so it ships
+# off-box — local-only snapshots do NOT survive box loss.
+# Install: sudo cp deploy/zul-backup.{service,timer} /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now zul-backup.timer
+[Unit]
+Description=Zul mainnet redb backup
+
+[Service]
+Type=oneshot
+User=ubuntu
+Environment=ZUL_NET=mainnet
+Environment=ZUL_DATA=/home/ubuntu/zul/data/mainnet
+Environment=ZUL_BACKUP_DIR=/home/ubuntu/zul/backups/mainnet
+# Off-box DR (set to a configured rclone remote to enable):
+# Environment=ZUL_BACKUP_REMOTE=b2:zul-backups
+ExecStart=/home/ubuntu/zul/scripts/backup-redb.sh

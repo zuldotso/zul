@@ -1,0 +1,10 @@
+# Daily Zul mainnet redb backup at 04:00 UTC (catches up if the box was off).
+[Unit]
+Description=Daily Zul mainnet redb backup
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
