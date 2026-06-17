@@ -1,0 +1,32 @@
+<h1 class="section" id="northstar"><span class="num">12 — The north star</span><span class="ttl">Privacy-Wrapping the SVM</span></h1>
+<div class="deck">The enshrined pool is one private program. The goal is to make privacy a property any program can opt into — and, eventually, a property of the SVM itself.</div>
+
+<p>Everything to this point describes a working privacy <em>application</em>: a shielded pool, generalized to multiple assets, verified natively, settled to Solana. It is good, and it is not the destination. The destination is to make privacy a property a program <em>opts into</em>, the way it opts into any other — so that a sealed-bid auction, a secret-ballot vote, a hidden-information game, or a non-leaking order book is just a program, running where no one can see the inputs and everyone can verify the result. Zul approaches this on a ladder, not in a leap (Figure&nbsp;8).</p>
+
+<figure>
+  @@fig:ladder@@
+  <figcaption><b>Figure 8.</b> The staged path. Today's enshrined pool is one hardcoded private program. Rung&nbsp;A generalizes it into a programmable privacy layer; rung&nbsp;B proves unmodified BPF execution over hidden state. Both stand on the same substrate this paper builds — settlement, native verification, hidden-state trees, and the shielded↔transparent boundary — so the near rung is genuinely the ladder to the far one.</figcaption>
+</figure>
+
+<h2><span class="num">12.1</span> Rung A — a programmable privacy layer</h2>
+<p>The shielded pool is a single circuit hardwired into the node. Rung&nbsp;A removes the &ldquo;single&rdquo; and the &ldquo;hardwired.&rdquo; It generalizes the pool's fixed machinery into four open mechanisms:</p>
+<ul class="dash">
+  <li><strong>A circuit / verifying-key registry.</strong> A developer registers a circuit describing a private state transition; the chain stores its verifying key and gives the program a private counterpart. The node already verifies arbitrary Groth16 natively, so the work is opening that door to many circuits rather than one built-in.</li>
+  <li><strong>A generic private-execution engine.</strong> The pool's &ldquo;verify proof → update tree → record nullifier&rdquo; loop becomes a general one: verify the registered circuit's proof against its declared public inputs, then apply the declared effects to that program's hidden state.</li>
+  <li><strong>Generalized notes.</strong> Today a note commits to <em>value</em>: <span class="math">\((\mathsf{asset\_id}, v, \pk, \mathsf{blind})\)</span>. Generalized, a note commits to <em>arbitrary application state</em> — an auction bid, a vote, a position — under the same commitment/nullifier discipline, so every dApp gets a private UTXO space of its own shape.</li>
+  <li><strong>A public⇄private CPI boundary.</strong> Today's <em>unshield</em> is exactly the special case of a private transition that emits a public effect: it spends a hidden note and triggers a transparent vault payment. Promoted to a first-class boundary, a private program can call a public one (and be called back) — which is what makes private programs compose with the existing SVM instead of living in a sealed annex.</li>
+</ul>
+<p>The result is an Aztec/Aleo-style model <a class="cite" href="#references">[24]</a><a class="cite" href="#references">[25]</a> realized on an SVM L2: any dApp that ships a circuit gets a private counterpart, and coverage grows program by program until &ldquo;most of the SVM can be private&rdquo; stops being a slogan and becomes a count.</p>
+
+<h2><span class="num">12.2</span> Rung B — a zkVM for the SBF</h2>
+<p>Rung&nbsp;A still asks a developer to write a circuit. Rung&nbsp;B removes even that: take an <em>unmodified</em> BPF/SBF program and prove its execution over hidden accounts directly, with no bespoke circuit — just the program. This is the SVM analogue of a general-purpose zkVM <a class="cite" href="#references">[12]</a>, and it is hard: it is years of work and active research, and we name it as a destination rather than a dated promise. Its value is that it collapses the gap between &ldquo;a Solana program&rdquo; and &ldquo;a private Solana program&rdquo; to nothing.</p>
+
+<h2><span class="num">12.3</span> Why A is the ladder, not a detour</h2>
+<p>The reason to build A first is not merely that it is easier; it is that A and B share their entire foundation. The settlement to Solana, the native proof verification, the hidden-state trees, the nullifier discipline, and above all the seam between the private and public worlds are the same whether the thing being proven is one registered circuit or a whole VM execution. We therefore build the reachable rung in the shape of the unreachable one, so that climbing is never starting over. Each component this paper describes — the SMT, the enshrined verifier, the commitment/nullifier machinery, the bridge boundary — is a load-bearing part of both rungs.</p>
+
+<h2><span class="num">12.4</span> What this changes for developers</h2>
+<p>Under rung&nbsp;A, deploying becomes a Zul-native lifecycle rather than a bare program upload: deploy the BPF program, register its circuit and verifying key, and initialize its private-state tree, as one coherent operation. This justifies a first-class <code>zul</code> toolchain that owns that lifecycle, much as today's SDK owns the shield/transfer/unshield flow. The through-line from this paper to that future is direct: the enshrined pool is the first program of the programmable layer, and its SDK is the first draft of that toolchain.</p>
+
+<div class="box"><span class="lab">The wager</span>
+<p style="margin:1.5mm 0 0">Two serious teams attacked Solana privacy and both narrowed away from the maximalist goal <a class="cite" href="#references">[27]</a><a class="cite" href="#references">[28]</a>. Zul's bet is that the way to actually reach &ldquo;most of the SVM is private&rdquo; is to ship the reachable rung first and generalize it, so every step stands on a working artifact and each makes the next one safer. A vision with no running system under it is decoration; this one has a mainnet under it.</p>
+</div>

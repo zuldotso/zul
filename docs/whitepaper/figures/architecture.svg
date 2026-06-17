@@ -1,0 +1,83 @@
+<svg viewBox="0 0 600 486" width="600" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0 0 L8 4.5 L0 9 z" fill="#5a2ee0"/>
+    </marker>
+    <marker id="ahs" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0 0 L8 4.5 L0 9 z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <!-- ===== Clients band ===== -->
+  <g>
+    <rect x="16"  y="10" width="172" height="50" rx="6" fill="#ffffff" stroke="#94a3b8"/>
+    <text x="102" y="32" text-anchor="middle" font-size="13.5" fill="#15161b" font-weight="600">Wallet + @zul/sdk</text>
+    <text x="102" y="49" text-anchor="middle" font-size="11.5" fill="#565a63">prove · sign · submit</text>
+
+    <rect x="214" y="10" width="172" height="50" rx="6" fill="#ffffff" stroke="#94a3b8"/>
+    <text x="300" y="32" text-anchor="middle" font-size="13.5" fill="#15161b" font-weight="600">Explorer (Next.js)</text>
+    <text x="300" y="49" text-anchor="middle" font-size="11.5" fill="#565a63">blocks · txs · pool stats</text>
+
+    <rect x="412" y="10" width="172" height="50" rx="6" fill="#ffffff" stroke="#94a3b8"/>
+    <text x="498" y="32" text-anchor="middle" font-size="13.5" fill="#15161b" font-weight="600">Indexer → Postgres</text>
+    <text x="498" y="49" text-anchor="middle" font-size="11.5" fill="#565a63">WS slot walk</text>
+  </g>
+
+  <!-- client <-> node connectors -->
+  <line x1="102" y1="60" x2="102" y2="92" stroke="#5a2ee0" stroke-width="1.3" marker-end="url(#ah)"/>
+  <line x1="300" y1="60" x2="300" y2="92" stroke="#5a2ee0" stroke-width="1.3" marker-end="url(#ah)"/>
+  <line x1="498" y1="60" x2="498" y2="92" stroke="#5a2ee0" stroke-width="1.3" marker-end="url(#ah)"/>
+  <text x="312" y="80" font-size="11" fill="#8a8f98" font-style="italic">Solana JSON-RPC subset</text>
+
+  <!-- ===== Node band ===== -->
+  <rect x="12" y="94" width="576" height="278" rx="9" fill="#f5f3fc" stroke="#5a2ee0" stroke-width="1.6"/>
+  <text x="28" y="116" font-size="15" fill="#3a1f93" font-weight="700">Zul Node — Rust, single PoA sequencer</text>
+
+  <rect x="28" y="126" width="544" height="34" rx="5" fill="#ffffff" stroke="#b9a9ef"/>
+  <text x="300" y="148" text-anchor="middle" font-size="12.5" fill="#15161b" font-weight="600">JSON-RPC server — HTTP + WebSocket subscriptions</text>
+
+  <!-- execution row -->
+  <rect x="28"  y="170" width="150" height="44" rx="5" fill="#ffffff" stroke="#b9a9ef"/>
+  <text x="103" y="190" text-anchor="middle" font-size="12.5" fill="#15161b" font-weight="600">Mempool</text>
+  <text x="103" y="205" text-anchor="middle" font-size="11" fill="#565a63">ordered queue</text>
+  <line x1="178" y1="192" x2="208" y2="192" stroke="#5a2ee0" stroke-width="1.3" marker-end="url(#ah)"/>
+  <rect x="210" y="170" width="180" height="44" rx="5" fill="#ffffff" stroke="#b9a9ef"/>
+  <text x="300" y="190" text-anchor="middle" font-size="12.5" fill="#15161b" font-weight="600">SVM Executor</text>
+  <text x="300" y="205" text-anchor="middle" font-size="11" fill="#565a63">Anza solana-svm</text>
+  <line x1="390" y1="192" x2="420" y2="192" stroke="#5a2ee0" stroke-width="1.3" marker-end="url(#ah)"/>
+  <rect x="422" y="170" width="150" height="44" rx="5" fill="#ffffff" stroke="#b9a9ef"/>
+  <text x="497" y="190" text-anchor="middle" font-size="12.5" fill="#15161b" font-weight="600">Block Producer</text>
+  <text x="497" y="205" text-anchor="middle" font-size="11" fill="#565a63">slot = height</text>
+
+  <!-- state + pool row -->
+  <rect x="28" y="224" width="266" height="48" rx="5" fill="#ffffff" stroke="#b9a9ef"/>
+  <text x="161" y="244" text-anchor="middle" font-size="12.5" fill="#15161b" font-weight="600">Account Store (redb) + State SMT</text>
+  <text x="161" y="261" text-anchor="middle" font-size="11" fill="#565a63">blake3 · depth 256 · root per block</text>
+  <rect x="306" y="224" width="266" height="48" rx="5" fill="#efeafc" stroke="#5a2ee0"/>
+  <text x="439" y="244" text-anchor="middle" font-size="12.5" fill="#3a1f93" font-weight="700">Shielded Pool — enshrined</text>
+  <text x="439" y="261" text-anchor="middle" font-size="11" fill="#565a63">Groth16/BN254 · Poseidon · no CU ceiling</text>
+
+  <!-- bridge row -->
+  <rect x="28" y="282" width="266" height="46" rx="5" fill="#ffffff" stroke="#b9a9ef"/>
+  <text x="161" y="301" text-anchor="middle" font-size="12.5" fill="#15161b" font-weight="600">Bridge Watcher</text>
+  <text x="161" y="317" text-anchor="middle" font-size="11" fill="#565a63">L1 deposits → L2 credits</text>
+  <rect x="306" y="282" width="266" height="46" rx="5" fill="#ffffff" stroke="#b9a9ef"/>
+  <text x="439" y="301" text-anchor="middle" font-size="12.5" fill="#15161b" font-weight="600">Batcher</text>
+  <text x="439" y="317" text-anchor="middle" font-size="11" fill="#565a63">state roots + DA chunks → L1</text>
+
+  <!-- node <-> L1 connectors -->
+  <line x1="190" y1="400" x2="190" y2="330" stroke="#475569" stroke-width="1.4" marker-end="url(#ahs)"/>
+  <text x="198" y="388" font-size="11" fill="#475569">deposits → L2 credit</text>
+  <line x1="448" y1="328" x2="448" y2="400" stroke="#5a2ee0" stroke-width="1.4" marker-end="url(#ah)"/>
+  <text x="300" y="392" font-size="11" fill="#5a2ee0">state roots + DA batches</text>
+
+  <!-- ===== L1 band ===== -->
+  <rect x="12" y="402" width="576" height="78" rx="9" fill="#f1f3f6" stroke="#475569" stroke-width="1.4"/>
+  <text x="28" y="423" font-size="14" fill="#334155" font-weight="700">Solana L1 — mainnet-beta (settlement &amp; data availability)</text>
+  <rect x="28"  y="432" width="172" height="38" rx="5" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="114" y="456" text-anchor="middle" font-size="12" fill="#15161b" font-weight="600">Settlement program</text>
+  <rect x="214" y="432" width="172" height="38" rx="5" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="300" y="456" text-anchor="middle" font-size="12" fill="#15161b" font-weight="600">Bridge vaults (PDA)</text>
+  <rect x="400" y="432" width="172" height="38" rx="5" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="486" y="456" text-anchor="middle" font-size="12" fill="#15161b" font-weight="600">DA log</text>
+</svg>

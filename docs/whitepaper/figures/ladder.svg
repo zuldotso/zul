@@ -1,0 +1,51 @@
+<svg viewBox="0 0 600 300" width="600" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="up" markerWidth="10" markerHeight="10" refX="5" refY="2" orient="auto"><path d="M0 8 L5 0 L10 8 z" fill="#5a2ee0"/></marker>
+    <style>
+      .step{stroke:#5a2ee0;stroke-width:1.6}
+      .s0{fill:#ffffff}
+      .s1{fill:#efeafc}
+      .s2{fill:#e6def9}
+      .ti{font-size:12.5px;font-weight:700;fill:#3a1f93}
+      .de{font-size:10px;fill:#565a63}
+      .tag{font-size:10px;fill:#5a2ee0;font-style:italic;font-weight:600}
+      .base{fill:#faf8f3;stroke:#cbb87a;stroke-width:1.2}
+      .bl{font-size:11px;fill:#7a5a12;font-weight:700}
+      .bd{font-size:10px;fill:#8a7a48}
+      .link{stroke:#cbb87a;stroke-width:1;stroke-dasharray:3 3}
+    </style>
+  </defs>
+
+  <!-- step 0 -->
+  <rect class="step s0" x="18" y="176" width="172" height="56" rx="7"/>
+  <text x="104" y="196" text-anchor="middle" class="ti">Enshrined pool</text>
+  <text x="104" y="212" text-anchor="middle" class="de">one hardcoded circuit</text>
+  <text x="104" y="226" text-anchor="middle" class="tag">live today</text>
+
+  <line x1="190" y1="190" x2="214" y2="174" stroke="#5a2ee0" stroke-width="1.8" marker-end="url(#up)"/>
+
+  <!-- step 1 (A) -->
+  <rect class="step s1" x="214" y="120" width="176" height="64" rx="7"/>
+  <text x="302" y="139" text-anchor="middle" class="ti">A · Programmable privacy</text>
+  <text x="302" y="154" text-anchor="middle" class="de">circuit/VK registry · generalized</text>
+  <text x="302" y="167" text-anchor="middle" class="de">notes · public⇄private CPI</text>
+  <text x="302" y="180" text-anchor="middle" class="tag">reachable now</text>
+
+  <line x1="390" y1="138" x2="414" y2="118" stroke="#5a2ee0" stroke-width="1.8" marker-end="url(#up)"/>
+
+  <!-- step 2 (B) -->
+  <rect class="step s2" x="414" y="58" width="172" height="68" rx="7"/>
+  <text x="500" y="78" text-anchor="middle" class="ti">B · SBF zkVM</text>
+  <text x="500" y="93" text-anchor="middle" class="de">prove unmodified BPF</text>
+  <text x="500" y="106" text-anchor="middle" class="de">over hidden accounts</text>
+  <text x="500" y="120" text-anchor="middle" class="tag">research horizon</text>
+
+  <!-- shared base -->
+  <rect class="base" x="14" y="246" width="572" height="44" rx="7"/>
+  <text x="300" y="264" text-anchor="middle" class="bl">Shared substrate — built once, reused at every rung</text>
+  <text x="300" y="280" text-anchor="middle" class="bd">settlement · native proof verification · hidden-state trees · the shielded ↔ transparent boundary</text>
+
+  <line class="link" x1="104" y1="232" x2="104" y2="246"/>
+  <line class="link" x1="302" y1="184" x2="302" y2="246"/>
+  <line class="link" x1="500" y1="126" x2="500" y2="246"/>
+</svg>

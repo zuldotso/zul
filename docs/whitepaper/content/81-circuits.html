@@ -1,0 +1,45 @@
+<h1 class="section" id="circuits"><span class="num">09 — Constraints</span><span class="ttl">The Shielded Circuits</span></h1>
+<div class="deck">Two circom circuits — a join-split transfer and an unshield — whose constraints are exactly the statements &ldquo;this spend is well-formed, authorized, and value-preserving.&rdquo;</div>
+
+<p>Both circuits are written in circom&nbsp;2.1.6 <a class="cite" href="#references">[21]</a> over the BN254 scalar field, using circomlib's Poseidon, comparators, and bit-decomposition gadgets <a class="cite" href="#references">[22]</a>. A subtle but important convention governs the public interface: circom orders public signals as outputs first and then inputs, so the circuits declare their public values as <em>inputs</em> in a fixed order and constrain them to the values the circuit derives. This makes the public-input vector deterministic and exactly matches the order the node's verifier reads (Appendix&nbsp;<a href="#appendix">E</a>).</p>
+
+<h2><span class="num">9.1</span> The transfer circuit</h2>
+<p>Figure&nbsp;7 shows the join-split. For inputs <span class="math">\(i\in\{0,1\}\)</span> with amounts <span class="math">\(v_i\)</span>, spending keys <span class="math">\(s_i\)</span>, blindings <span class="math">\(b_i\)</span>, positions <span class="math">\(\iota_i\)</span>, and outputs <span class="math">\(j\in\{0,1\}\)</span> with amounts <span class="math">\(v'_j\)</span>, recipient keys <span class="math">\(\pk'_j\)</span>, blindings <span class="math">\(b'_j\)</span>, sharing one private <span class="math">\(\mathsf{asset\_id}=\mathfrak a\)</span> and a public <span class="math">\(\mathsf{fee}\)</span>, the circuit enforces:</p>
+
+<figure>
+  @@fig:joinsplit@@
+  <figcaption><b>Figure 7.</b> The 2-in/2-out transfer circuit. Real inputs are proven members of a recent root; nullifiers and output commitments are bound to the public signals; value is conserved over a single, private asset; and amounts are range-checked so sums cannot wrap the field.</figcaption>
+</figure>
+
+<div class="defn">
+<ol class="tight">
+  <li><strong>Derivation and binding.</strong> For each input, <span class="math">\(\pk_i=\H_1(s_i)\)</span>, <span class="math">\(\cm_i=\H_3(\mathfrak a, v_i, \H_2(\pk_i,b_i))\)</span>, and <span class="math">\(\nf_i=\H_3(\cm_i,\iota_i,s_i)\)</span> with the public nullifier constrained <span class="math">\(\nf_i \stackrel{!}{=} \mathsf{nullifier}[i]\)</span>. For each output, <span class="math">\(\cm'_j=\H_3(\mathfrak a, v'_j, \H_2(\pk'_j,b'_j))\)</span> with <span class="math">\(\cm'_j \stackrel{!}{=} \mathsf{out\_commitment}[j]\)</span>.</li>
+  <li><strong>Membership with dummy handling.</strong> Each input proves Merkle inclusion of <span class="math">\(\cm_i\)</span> at <span class="math">\(\iota_i\)</span> under the public <span class="math">\(\mathsf{root}\)</span>, gated by <span class="math">\(\mathsf{enabled}_i = 1-\mathsf{isZero}(v_i)\)</span>; a zero-amount input is a <em>dummy</em> whose membership check is skipped, exactly as in Tornado&nbsp;Nova <a class="cite" href="#references">[18]</a>. Concretely the constraint is <span class="math">\((\widehat{\mathsf{root}}_i - \mathsf{root})\cdot \mathsf{enabled}_i = 0\)</span>, where <span class="math">\(\widehat{\mathsf{root}}_i\)</span> is the root recomputed from the supplied path.</li>
+  <li><strong>Value conservation.</strong> <span class="math">\(v_0 + v_1 = v'_0 + v'_1 + \mathsf{fee}\)</span> over a single asset.</li>
+  <li><strong>Asset gating.</strong> All four notes share <span class="math">\(\mathfrak a\)</span> (which is never made public), and the fee may be non-zero only in the native asset: <span class="math">\(\mathsf{fee}\cdot\big(1-\mathsf{isZero}(\mathfrak a)\big) = 0\)</span>.</li>
+  <li><strong>Range.</strong> Every amount is decomposed into 64 bits (<span class="math">\(\mathsf{Num2Bits}(64)\)</span>), so <span class="math">\(0\le v < 2^{64}\)</span> and no sum can wrap the 254-bit field.</li>
+  <li><strong>Distinct nullifiers.</strong> <span class="math">\(\nf_0 \ne \nf_1\)</span>, closing the &ldquo;spend the same note twice within one proof&rdquo; attack.</li>
+</ol>
+</div>
+
+<p>The public-input vector is <span class="math">\([\,\mathsf{root},\nf_0,\nf_1,\cm_0,\cm_1,\mathsf{fee}\,]\)</span> — six elements, and nothing about the amounts, the asset, the owners, or which leaves were spent appears in it.</p>
+
+<h2><span class="num">9.2</span> The unshield circuit</h2>
+<p>Unshield spends one input note to a public <span class="math">\((\mathsf{recipient},\mathsf{amount})\)</span> in a stated <span class="math">\(\mathsf{asset\_id}\)</span>, returning the remainder to a private change note. With input amount <span class="math">\(v\)</span>, key <span class="math">\(s\)</span>, blinding <span class="math">\(b\)</span>, position <span class="math">\(\iota\)</span>, and change <span class="math">\((v_c,\pk_c,b_c)\)</span>, it enforces:</p>
+<div class="defn">
+<ol class="tight">
+  <li><strong>Spend authorization.</strong> <span class="math">\(\pk=\H_1(s)\)</span>, <span class="math">\(\cm=\H_3(\mathsf{asset\_id}, v, \H_2(\pk,b))\)</span>, Merkle inclusion of <span class="math">\(\cm\)</span> under <span class="math">\(\mathsf{root}\)</span> (always enabled), and <span class="math">\(\nf=\H_3(\cm,\iota,s) \stackrel{!}{=} \mathsf{nullifier}\)</span>.</li>
+  <li><strong>Change well-formedness.</strong> <span class="math">\(\cm_{\text{chg}}=\H_3(\mathsf{asset\_id}, v_c, \H_2(\pk_c,b_c)) \stackrel{!}{=} \mathsf{change\_commitment}\)</span>, sharing the input's asset.</li>
+  <li><strong>Conservation.</strong> <span class="math">\(v = \mathsf{amount} + v_c\)</span>, with all three amounts range-checked to 64 bits.</li>
+  <li><strong>Recipient binding.</strong> A constraint <span class="math">\(\mathsf{recipient}^2 = \mathsf{recipient}\cdot\mathsf{recipient}\)</span> forces the recipient signal into the constraint system so the solver cannot optimize it away. This is what prevents a public unshield from being <em>front-run</em> to a different address: the recipient is part of what the proof attests, so a relayer cannot rewrite it.</li>
+</ol>
+</div>
+<p>The public-input vector is <span class="math">\([\,\mathsf{root},\nf,\cm_{\text{chg}},\mathsf{asset\_id},\mathsf{amount},\mathsf{recipient}\,]\)</span> — again six elements. Here the asset and amount <em>are</em> public, because the vault movement they trigger reveals them anyway; what stays hidden is the input note, its owner, and the change.</p>
+
+<h2><span class="num">9.3</span> Groth16 instantiation</h2>
+<p>Each circuit compiles to a rank-1 constraint system, and Groth16 <a class="cite" href="#references">[9]</a> turns the R1CS into a proving key and a verifying key via a per-circuit trusted setup (§<a href="#security">10.5</a>). A proof is three group elements <span class="math">\((A,B,C)\in\G_1\times\G_2\times\G_1\)</span>, and verification is the single pairing-product equation</p>
+$$ e(A,B) \;=\; e(\alpha,\beta)\cdot e\!\Big(\textstyle\sum_{k=0}^{\ell} a_k\, L_k,\ \gamma\Big)\cdot e(C,\delta), $$
+<p>where <span class="math">\((a_0,\dots,a_\ell)\)</span> are the public inputs (with <span class="math">\(a_0=1\)</span>) and <span class="math">\(L_k,\alpha,\beta,\gamma,\delta\)</span> come from the verifying key. For Zul both circuits have <span class="math">\(\ell=6\)</span> public inputs in the orders above. The node performs this check natively (§<a href="#shielded">8.6</a>); its cost is constant and independent of circuit size, which is precisely why Groth16 suits an enshrined verifier.</p>
+
+<h2><span class="num">9.4</span> Design notes</h2>
+<p>Three small choices carry weight. Poseidon's low multiplicative complexity makes each commitment, nullifier, and Merkle node cost a handful of constraints, so a full join-split is a small circuit and proving stays seconds-scale in the browser. The Merkle gadget routes left/right children with a multiplexer driven by the index bits, matching the incremental tree's index arithmetic so the in-node tree and the in-circuit tree address leaves identically. And the 64-bit range checks are not cosmetic: without them an adversary could choose amounts near the field modulus so that <span class="math">\(v_0+v_1\)</span> wraps, manufacturing value out of modular arithmetic. Bounding amounts to <span class="math">\(2^{64}\)</span> keeps every sum honest in <span class="math">\(\mathbb Z\)</span> (Theorem&nbsp;<a href="#thm-balance">4</a>).</p>

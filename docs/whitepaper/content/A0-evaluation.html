@@ -1,0 +1,43 @@
+<h1 class="section" id="evaluation"><span class="num">11 — Reality check</span><span class="ttl">Implementation &amp; Evaluation</span></h1>
+<div class="deck">A deployed system, the tests that hold its pieces together, and an honest account of its performance and its limits.</div>
+
+<p>Zul is not a specification awaiting implementation; it is an implementation this document describes. The node is a Rust workspace driving Anza's <code>solana-svm</code>; the L1 programs are Anchor; the circuits are circom with a snarkjs proving path; the client stack is a TypeScript SDK, a Next.js explorer, and an indexer. This section reports what exists, how it is verified, and how it performs.</p>
+
+<h2><span class="num">11.1</span> Components and verification</h2>
+<p>Each component is covered by unit and integration tests; the cross-language bindings — the seams most likely to drift silently — are pinned by explicit cross-tests.</p>
+
+<figure class="nobreak">
+  <table class="long" style="font-size:9pt">
+    <caption><b>Table 3.</b> Workspace components and how each is verified. The chain workspace alone carries well over one hundred Rust tests.</caption>
+    <thead><tr><th>Component</th><th>Role</th><th>Verified by</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">zul-primitives</td><td>hashing, blocks, genesis, constants</td><td>field/hash/Merkle vectors</td></tr>
+      <tr><td class="mono">zul-store</td><td>redb account store, SMT, nullifiers</td><td>SMT proofs, atomic commit, order-independence</td></tr>
+      <tr><td class="mono">zul-executor</td><td>solana-svm integration</td><td>real SVM transfers; SPL mint runs in-VM</td></tr>
+      <tr><td class="mono">zul-privacy</td><td>shielded pool, Groth16, Poseidon</td><td>proof verify, pool service, snarkjs cross-test</td></tr>
+      <tr><td class="mono">zul-rpc</td><td>Solana JSON-RPC subset</td><td>method-level tests against fixtures</td></tr>
+      <tr><td class="mono">zul-bridge</td><td>deposit watcher, batcher, DA</td><td>batcher + deposit flow (L1 client mockable)</td></tr>
+      <tr><td class="mono">zul-node</td><td>block loop, gas, e2e</td><td>block production, shield e2e, restart safety</td></tr>
+      <tr><td>programs/ (Anchor)</td><td>settlement, bridge, da_log</td><td>BPF build + host tests; SMT cross-pinned to L2</td></tr>
+      <tr><td>circuits/</td><td>transfer, unshield (circom)</td><td>compile + snarkjs↔arkworks proof cross-test</td></tr>
+      <tr><td>sdk/ &amp; indexer/</td><td>TS client, Postgres indexer</td><td>bincode cross-test with Rust; idempotent slot-walk</td></tr>
+    </tbody>
+  </table>
+</figure>
+
+<h2><span class="num">11.2</span> Cross-language soundness</h2>
+<p>Three bindings could break consensus if any side drifted, so each is asserted directly:</p>
+<ul class="dash">
+  <li>a snarkjs-generated Groth16 proof must verify in the arkworks node verifier, so prover and verifier cannot diverge;</li>
+  <li>the TypeScript SDK's bincode encoding must equal Rust's serde output byte-for-byte, so the client and node agree on every wire structure;</li>
+  <li>the L1 (Anchor) blake3 SMT must match the L2 store SMT, pinned by shared constants such as the empty-tree root, so the program verifies exactly the proofs the node produces.</li>
+</ul>
+
+<h2><span class="num">11.3</span> Performance</h2>
+<p>The shielded design is deliberately sized for client-side proving. A 2-in/2-out join-split over Poseidon is a small circuit, so a browser generates a transfer proof with snarkjs in a few seconds on commodity hardware — fast enough that a wallet need not run a prover sidecar. Verification is the opposite extreme: Groth16's check is a constant three-pairing equation independent of circuit size, completing on the order of a millisecond in native arkworks code. Because the pool is an enshrined builtin (§<a href="#execution">4.2</a>), that verification pays <em>no</em> compute-unit cost — the decisive advantage of native verification over running a pairing inside metered BPF, where a single shielded transaction could exhaust a block's budget. The state SMT updates touch only the accounts a block actually wrote, so commitment cost scales with activity, not with the size of the account set.</p>
+
+<h2><span class="num">11.4</span> Mainnet status</h2>
+<p>Zul is live on Solana mainnet-beta. The settlement and data-availability programs are deployed and initialized; the batcher posts non-empty batches on a periodic sweep; and the end-to-end shielded flow has been exercised on mainnet with the production ceremony keys: a shield, a real Groth16 private transfer, a double-spend attempt that was <em>rejected</em>, and an unshield that paid the recipient. Native gas was seeded by bridging the gas mint one-for-one, and a native L2 transfer confirmed. The exact deployment identifiers are listed in Appendix&nbsp;<a href="#appendix">D</a>. In the interest of accuracy: the outbound-withdraw and arbitrary-SPL-deposit paths are the same bytecode proven on devnet and testnet and were not separately re-exercised on mainnet at launch.</p>
+
+<h2><span class="num">11.5</span> A note on the curve</h2>
+<p>BN254 is the pragmatic choice today: it is the curve circom and snarkjs target and the curve Solana's <code>alt_bn128</code> syscalls implement, which is what makes both browser proving and a future on-chain verifier path realistic. Its security level is now estimated near 100 bits rather than the 128 once assumed <a class="cite" href="#references">[13]</a>. For the present value at stake this is adequate, and the integrity guarantees of §<a href="#security">10</a> degrade gracefully — an attacker would need to break discrete log on BN254, not merely observe the chain. A migration to a higher-security pairing-friendly curve, or to a transparent proof system for the programmable layer, is a clean future change because verification is isolated behind the verifying-key interface (§<a href="#circuits">9.3</a>).</p>

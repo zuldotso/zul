@@ -1,0 +1,47 @@
+<h1 class="section" id="execution"><span class="num">04 — Transparent machine</span><span class="ttl">The SVM Execution Layer</span></h1>
+<div class="deck">Running the real Solana runtime over a custom store, so every existing program and wallet works unchanged — and so the chain can verify arbitrary zero-knowledge proofs on-chain.</div>
+
+<p>The execution layer's job is to be <em>boringly</em> Solana. If the L2 executed transactions even slightly differently from a validator, the entire program ecosystem and tooling base would break, and the leverage of building on the SVM would evaporate. Zul therefore does not reimplement the runtime; it embeds Anza's <code>solana-svm</code> <a class="cite" href="#references">[6]</a> and supplies only the parts a rollup must own: where account state comes from, when blocks are sealed, and how state is committed.</p>
+
+<h2><span class="num">4.1</span> Embedding <code>solana-svm</code></h2>
+<p>The core of the executor is a <code>TransactionBatchProcessor</code> driven through the <code>TransactionProcessingCallback</code> trait. The callback is Zul's adapter between the SVM and its own storage: when the processor needs an account, the callback answers from a two-layer view — a write overlay holding accounts touched earlier in the same block, falling back to the committed <code>redb</code> store. After a batch executes, the resulting account writes are collected from the overlay, applied to the store, and folded into the state commitment (§<a href="#state">5</a>). Because Zul is a single sequencer with a linear history, the program cache's fork graph is trivial and every account is reported at one slot, which keeps loader and cache behavior deterministic.</p>
+
+<div class="defn">
+<p><strong>Per-slot pipeline.</strong> Each block is produced by the following steps, all within the node:</p>
+<ol class="tight">
+  <li>drain ordered transactions from the mempool;</li>
+  <li>apply any pending L1 deposits as direct credits (§<a href="#bridge">7.3</a>);</li>
+  <li>sanitize and signature-verify each transaction, and check its blockhash against the recent-blockhash queue;</li>
+  <li>charge fees and run compute-budget instructions, then <code>load_and_execute_transactions</code> through the SVM;</li>
+  <li>collect account writes; update the state SMT with exactly the touched accounts;</li>
+  <li>seal the block header with the new <code>state_root</code>, and make non-empty data available to the batcher (§<a href="#settlement">6</a>).</li>
+</ol>
+</div>
+
+<h2><span class="num">4.2</span> Builtins and preloaded programs</h2>
+<p>The processor is configured with the standard builtin programs — the System program, the BPF loaders (including loader-v4), and the Compute-Budget program — and the common SPL programs are preloaded so they exist from genesis: the SPL Token and Token-2022 programs, the Associated-Token-Account program, and Memo. Crucially, the set of builtins also includes Zul's own <strong>shielded-pool program</strong> at a reserved address. It is registered as a builtin precisely so it executes in native Rust rather than as metered BPF; this is what frees proof verification from the compute-unit budget (§<a href="#shielded">8</a>). User-deployed BPF programs work exactly as on Solana, through the upgradeable loader.</p>
+
+<h2><span class="num">4.3</span> Sysvars, features, and determinism</h2>
+<p>The executor maintains the sysvars programs expect. The <code>Clock</code> is refreshed every slot with the block's height and timestamp; <code>Rent</code> and the other static sysvars are seeded at genesis. The runtime is configured with the full feature set enabled, matching a modern Solana cluster, so feature-gated program behavior matches mainnet. Determinism comes from three facts: a single ordering authority, a fixed per-slot sysvar update, and a content-addressed account store whose Merkleization is insertion-order independent (Theorem&nbsp;<a href="#thm-smt-det">2</a>).</p>
+
+<h2><span class="num">4.4</span> Native verification of zero-knowledge proofs</h2>
+<p>Because the full feature set is enabled, the runtime exposes the <code>alt_bn128</code> syscalls — addition, scalar multiplication, and the pairing check on the BN254 curve — and the <code>poseidon</code> syscall. The immediate consequence is mundane and the eventual one is the entire thesis of this project. Mundanely, the enshrined pool does not even need the syscalls, because it verifies in native arkworks code (§<a href="#shielded">8.6</a>). The eventual consequence is that <em>an ordinary BPF program running on Zul can itself verify a Groth16 or PLONK proof on-chain</em>, within its compute budget, using the same pairing the pool uses. That capability — arbitrary, user-deployed programs verifying succinct proofs natively — is the seed of the programmable privacy layer (§<a href="#northstar">12</a>). The execution layer is built today in the shape of what it must become.</p>
+
+<div class="box">
+  <span class="lab">Block</span>
+<pre><span class="c">// sealed once per slot; the state_root anchors all account state</span>
+BlockHeader {
+  slot:              u64,        <span class="c">// = chain height</span>
+  parent_hash:       H256,
+  state_root:        H256,       <span class="c">// blake3 SMT root over all accounts (§5)</span>
+  transactions_root: H256,
+  timestamp_ms:      u64,
+  transaction_count: u32,
+}</pre>
+</div>
+
+<h2><span class="num">4.5</span> Fees and the gas token</h2>
+<p>Zul's lamport unit is <strong>ZUL</strong>. SOL does not exist natively on the L2; it arrives only as a bridged, wrapped asset (§<a href="#bridge">7</a>). Fees use the SVM's standard handling — a base fee plus compute-budget-driven priority — paid in ZUL and swept to a collector account. Native ZUL is fully backed: with zero genesis pre-mine on mainnet, every native ZUL lamport corresponds to a ZUL-SPL token locked in the L1 bridge vault (§<a href="#bridge">7.3</a>), so the gas supply cannot be conjured by the sequencer any more than user value can.</p>
+
+<h2><span class="num">4.6</span> RPC compatibility</h2>
+<p>The node answers a subset of the Solana JSON-RPC over HTTP and WebSocket (Appendix&nbsp;<a href="#appendix">C</a>): the read and submit methods wallets and the <code>solana</code> CLI use — <code>sendTransaction</code>, <code>simulateTransaction</code>, <code>getAccountInfo</code>, <code>getLatestBlockhash</code>, <code>getSignaturesForAddress</code>, <code>getTransaction</code>, token-account queries — plus slot, signature, and account subscriptions, and one Zul-specific method, <code>getWithdrawalProof</code>, that returns an SMT inclusion proof for a bridge claim (§<a href="#settlement">6.3</a>). Reporting an accurate <code>solana-core</code> version and the legacy status fields is enough that off-the-shelf clients treat Zul as a Solana cluster.</p>

@@ -1,0 +1,43 @@
+<h1 class="section" id="intro"><span class="num">01 — Foundations</span><span class="ttl">Introduction</span></h1>
+<div class="deck">Most of what a public blockchain learns about you, it tells everyone, forever. Zul inverts that default.</div>
+
+<p class="lead-drop">Public ledgers achieved something genuinely new: agreement without an authority. Anyone can verify that a transaction is valid, that no coin was spent twice, that the rules were followed — and they can do it without trusting a bank, a government, or each other. This is the great result of Bitcoin <a class="cite" href="#references">[3]</a> and its successors, the programmable chains <a class="cite" href="#references">[4]</a>. But the dominant designs purchased that verifiability with a second, unadvertised property: total transparency. Every balance, every counterparty, every amount, and the exact order in which you acted are written into a permanent public record. Surveillance became the default and privacy the exception — not because the mathematics demanded it, but because it was the easiest way to let everyone check everyone else's work.</p>
+
+<p>It did not have to be this way, and it does not have to stay this way. The case for financial privacy is older than the blockchain that erased it:</p>
+
+<blockquote>
+  Privacy is necessary for an open society in the electronic age. … We cannot expect governments, corporations, or other large, faceless organizations to grant us privacy out of their beneficence.
+  <cite>— A Cypherpunk's Manifesto, 1993 <a class="cite" href="#references">[2]</a></cite>
+</blockquote>
+
+<p>Thirty years on, that sentence is still mostly unbuilt. The tools we have for financial privacy on public ledgers are narrow and, almost without exception, take the shape of a single program: a mixer, a shielded coin, a confidential-balance token <a class="cite" href="#references">[7]</a><a class="cite" href="#references">[8]</a><a class="cite" href="#references">[17]</a>. These are boxes you put value into and take value out of. They are useful, and they are far too small. Privacy should not be one application you visit; it should be a property the execution environment itself can offer.</p>
+
+<h2><span class="num">1.1</span> What Zul is</h2>
+
+<p><strong>Zul</strong> is a Solana Layer&nbsp;2 that runs real SVM execution, produces its own blocks, and settles to Solana. It embeds Anza's <code>solana-svm</code> transaction processor <a class="cite" href="#references">[6]</a> — the same execution pipeline a Solana validator uses — over a custom account store, so standard programs (System, the SPL Token and Token-2022 programs, the Associated-Token, Memo, and Compute-Budget programs, and user-deployed BPF) run unchanged, and the Solana JSON-RPC surface lets existing wallets and the <code>solana</code> CLI talk to the L2 with no modification. It has a native gas token, <strong>ZUL</strong>, and a working zero-knowledge shielded pool in which a user can hold value, send it to someone, and withdraw it, with the amounts and the links between parties hidden behind proofs. That part is not a roadmap item. It runs on mainnet today.</p>
+
+<p>Zul is also honest about what it is not yet. A single sequencer orders the blocks; we do not dress that up. A privacy project that misrepresents its own trust model has already failed at the one thing it sells. Throughout this document we state precisely how much trust each component requires, and we design toward needing less of it, not more (§<a href="#architecture">3</a>, §<a href="#roadmap">13</a>).</p>
+
+<h2><span class="num">1.2</span> Why &ldquo;a property, not an app&rdquo;</h2>
+
+<p>Privacy, almost everywhere it exists on-chain, is a single hardcoded program. Zul ships one of those too — an enshrined shielded pool — and it is good, and it is not the point. The point is that privacy should be something a program <em>opts into</em>, the way it opts into any other property: a sealed-bid auction where the bids stay sealed; a vote whose ballots stay secret while the tally stays provable; an order book that does not leak your position the instant you take it. None of these should require a new chain. They should be programs running in an environment where <em>no one can see the inputs and everyone can verify the result</em>. Zul's enshrined pool is the first, fully working instance of that environment; the architecture is built so the same settlement, proof-verification, and hidden-state machinery generalizes to the rest (§<a href="#northstar">12</a>).</p>
+
+<h2><span class="num">1.3</span> Contributions</h2>
+
+<p>This paper documents a complete, deployed system. Its contributions are as much in integration as in any single primitive:</p>
+
+<div class="box">
+  <span class="lab">Contributions</span>
+  <ol class="tight" style="margin-top:2mm">
+    <li><strong>A genuine SVM rollup.</strong> A from-scratch Rust node that drives Anza's <code>solana-svm</code> over a redb-backed account store, reproducing enough of a validator's runtime — sysvars, builtins, fee handling, blockhash queue — that unmodified Solana tooling treats the L2 as a Solana cluster (§<a href="#execution">4</a>).</li>
+    <li><strong>A dual state-commitment design.</strong> A depth-256 blake3 sparse Merkle tree commits all account state into each block's root, paired with a deliberately shallow depth-32 withdrawals tree whose inclusion proofs fit inside Solana's per-transaction compute budget on L1 (§<a href="#state">5</a>, §<a href="#settlement">6</a>).</li>
+    <li><strong>An enshrined, multi-asset shielded pool.</strong> A UTXO shielded pool processed <em>outside</em> the SVM and therefore free of any compute-unit ceiling on proof verification, using Poseidon commitments, a two-level commitment that makes deposits proofless yet sound, and Groth16/BN254 proofs verified natively in-node (§<a href="#shielded">8</a>, §<a href="#circuits">9</a>).</li>
+    <li><strong>A composable shielded↔transparent boundary.</strong> A bidirectional bridge for SOL and arbitrary SPL tokens whose withdrawals bind an asset identifier, so a private balance can become a public one — and vice versa — without the boundary becoming a leak or a theft vector (§<a href="#bridge">7</a>).</li>
+    <li><strong>Security analysis with explicit trust accounting.</strong> Definitions and proof sketches for balance integrity, double-spend resistance, and unlinkability, together with a frank threat model that names every property not yet enforced in cryptography (§<a href="#security">10</a>).</li>
+    <li><strong>A staged path to a private SVM.</strong> A concrete plan to generalize the single enshrined circuit into a programmable privacy layer, and ultimately a zk-VM for the SVM, reusing the very components this paper describes (§<a href="#northstar">12</a>).</li>
+  </ol>
+</div>
+
+<h2><span class="num">1.4</span> Roadmap of this document</h2>
+
+<p>Section&nbsp;<a href="#background">2</a> situates Zul among rollups and privacy systems. Section&nbsp;<a href="#architecture">3</a> gives the architecture and the trust model. Sections&nbsp;<a href="#execution">4</a>–<a href="#bridge">7</a> build the transparent machine: execution, state commitment, settlement and data availability, and the bridge. Sections&nbsp;<a href="#shielded">8</a>–<a href="#circuits">9</a> develop the shielded pool and its circuits in full. Section&nbsp;<a href="#security">10</a> states and argues the security properties; Section&nbsp;<a href="#evaluation">11</a> reports the implementation and its measurements. Sections&nbsp;<a href="#northstar">12</a>–<a href="#roadmap">13</a> set out the north star and the trust-minimization roadmap. Appendices collect the protocol's exact parameters, constants, and interfaces.</p>

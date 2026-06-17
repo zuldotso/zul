@@ -1,0 +1,53 @@
+<svg viewBox="0 0 600 332" width="600" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="bd" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L8 4.5 L0 9 z" fill="#5a2ee0"/></marker>
+    <marker id="bu" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L8 4.5 L0 9 z" fill="#475569"/></marker>
+    <style>
+      .l1{fill:#f1f3f6;stroke:#475569;stroke-width:1.2}
+      .l2{fill:#efeafc;stroke:#5a2ee0;stroke-width:1.3}
+      .t{font-size:12px;fill:#15161b;font-weight:600}
+      .s{font-size:10.5px;fill:#565a63}
+      .cap{font-size:11.5px;font-weight:700}
+    </style>
+  </defs>
+
+  <text x="120" y="20" text-anchor="middle" class="cap" fill="#475569">Solana L1</text>
+  <text x="480" y="20" text-anchor="middle" class="cap" fill="#3a1f93">Zul L2</text>
+  <line x1="300" y1="8" x2="300" y2="232" stroke="#e2e0da" stroke-width="1" stroke-dasharray="4 3"/>
+
+  <!-- deposit -->
+  <text x="14" y="46" class="cap" fill="#5a2ee0">Deposit  (L1 → L2)</text>
+  <rect class="l1" x="14" y="54" width="150" height="50" rx="6"/>
+  <text x="89" y="74" text-anchor="middle" class="t">deposit_sol / _spl</text>
+  <text x="89" y="90" text-anchor="middle" class="s">lock in vault PDA</text>
+  <line x1="164" y1="79" x2="232" y2="79" stroke="#5a2ee0" stroke-width="1.5" marker-end="url(#bd)"/>
+  <text x="198" y="72" text-anchor="middle" class="s">Deposited event</text>
+  <rect class="l2" x="320" y="40" width="130" height="36" rx="6"/>
+  <text x="385" y="63" text-anchor="middle" class="t">Watcher (exact-once)</text>
+  <line x1="385" y1="76" x2="385" y2="96" stroke="#5a2ee0" stroke-width="1.5" marker-end="url(#bd)"/>
+  <rect class="l2" x="468" y="92" width="118" height="50" rx="6"/>
+  <text x="527" y="112" text-anchor="middle" class="t">L2 credit</text>
+  <text x="527" y="128" text-anchor="middle" class="s">native ZUL | wrapped</text>
+  <rect class="l2" x="320" y="92" width="130" height="50" rx="6"/>
+  <text x="385" y="112" text-anchor="middle" class="t">apply_deposits</text>
+  <text x="385" y="128" text-anchor="middle" class="s">1:1, no pre-mine</text>
+  <line x1="450" y1="117" x2="466" y2="117" stroke="#5a2ee0" stroke-width="1.5" marker-end="url(#bd)"/>
+
+  <!-- withdraw -->
+  <text x="14" y="176" class="cap" fill="#475569">Withdraw  (L2 → L1)</text>
+  <rect class="l2" x="436" y="184" width="150" height="48" rx="6"/>
+  <text x="511" y="204" text-anchor="middle" class="t">L2 burn</text>
+  <text x="511" y="220" text-anchor="middle" class="s">→ withdrawals SMT</text>
+  <line x1="436" y1="208" x2="166" y2="208" stroke="#475569" stroke-width="1.5" marker-end="url(#bu)"/>
+  <text x="300" y="200" text-anchor="middle" class="s">inclusion proof vs posted root</text>
+  <rect class="l1" x="14" y="184" width="150" height="48" rx="6"/>
+  <text x="89" y="204" text-anchor="middle" class="t">claim_withdrawal*</text>
+  <text x="89" y="220" text-anchor="middle" class="s">release bound asset</text>
+
+  <!-- mapping legend -->
+  <rect x="14" y="250" width="572" height="74" rx="6" fill="#faf8f3" stroke="#e2e0da"/>
+  <text x="26" y="268" class="cap" fill="#3a1f93">Asset mapping</text>
+  <text x="26" y="286" class="s" font-size="11">• ZUL-SPL (gas mint)  →  native ZUL lamports, 1:1   (every native ZUL is vault-backed)</text>
+  <text x="26" y="302" class="s" font-size="11">• SOL  →  wrapped wSOL (So111…112)</text>
+  <text x="26" y="318" class="s" font-size="11">• any other SPL  →  deterministic wrapped mint  addr = blake3(D ‖ l1_mint),  keyless authority</text>
+</svg>

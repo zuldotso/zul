@@ -1,0 +1,54 @@
+<svg viewBox="0 0 600 300" width="600" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a1" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L8 4.5 L0 9 z" fill="#5a2ee0"/></marker>
+    <style>
+      .b{fill:#ffffff;stroke:#b9a9ef;stroke-width:1.3}
+      .bl{fill:#f1f3f6;stroke:#475569;stroke-width:1.2}
+      .t{font-size:12px;fill:#15161b;font-weight:600}
+      .s{font-size:10.5px;fill:#565a63}
+      .e{stroke:#5a2ee0;stroke-width:1.4;fill:none}
+      .cap{font-size:11px;fill:#3a1f93;font-weight:700}
+    </style>
+  </defs>
+
+  <text x="14" y="20" class="cap">A · Batch posting (data availability + settlement)</text>
+  <!-- L2 blocks -->
+  <rect class="b" x="14" y="32" width="120" height="48" rx="6"/>
+  <text x="74" y="52" text-anchor="middle" class="t">L2 blocks</text>
+  <text x="74" y="68" text-anchor="middle" class="s">slots [n .. m]</text>
+  <line class="e" x1="134" y1="56" x2="176" y2="56" marker-end="url(#a1)"/>
+  <!-- batcher -->
+  <rect class="b" x="178" y="32" width="130" height="48" rx="6"/>
+  <text x="243" y="52" text-anchor="middle" class="t">Batcher</text>
+  <text x="243" y="68" text-anchor="middle" class="s">zstd · 800-byte chunks</text>
+  <!-- to da_log -->
+  <line class="e" x1="243" y1="80" x2="243" y2="118" marker-end="url(#a1)"/>
+  <rect class="bl" x="158" y="120" width="170" height="44" rx="6"/>
+  <text x="243" y="140" text-anchor="middle" class="t">da_log program</text>
+  <text x="243" y="156" text-anchor="middle" class="s">chunk 0 … chunk k</text>
+  <!-- to settlement -->
+  <line class="e" x1="308" y1="56" x2="356" y2="56" marker-end="url(#a1)"/>
+  <rect class="bl" x="358" y="28" width="230" height="58" rx="6"/>
+  <text x="473" y="48" text-anchor="middle" class="t">Settlement · post_batch</text>
+  <text x="473" y="64" text-anchor="middle" class="s">{ batch_no, slots, state_root,</text>
+  <text x="473" y="78" text-anchor="middle" class="s">withdrawals_root, da_hash }</text>
+
+  <line x1="14" y1="186" x2="586" y2="186" stroke="#e2e0da" stroke-width="1"/>
+
+  <text x="14" y="208" class="cap">B · Withdrawal (L2 → L1)</text>
+  <rect class="b" x="14" y="220" width="118" height="46" rx="6"/>
+  <text x="73" y="240" text-anchor="middle" class="t">L2 burn</text>
+  <text x="73" y="255" text-anchor="middle" class="s">unshield / exit</text>
+  <line class="e" x1="132" y1="243" x2="168" y2="243" marker-end="url(#a1)"/>
+  <rect class="b" x="170" y="220" width="132" height="46" rx="6"/>
+  <text x="236" y="240" text-anchor="middle" class="t">Withdrawals SMT</text>
+  <text x="236" y="255" text-anchor="middle" class="s">depth 32 (shallow)</text>
+  <line class="e" x1="302" y1="243" x2="338" y2="243" marker-end="url(#a1)"/>
+  <rect class="bl" x="340" y="220" width="140" height="46" rx="6"/>
+  <text x="410" y="240" text-anchor="middle" class="t">claim_withdrawal</text>
+  <text x="410" y="255" text-anchor="middle" class="s">+ inclusion proof</text>
+  <line class="e" x1="480" y1="243" x2="516" y2="243" marker-end="url(#a1)"/>
+  <rect class="bl" x="518" y="220" width="70" height="46" rx="6"/>
+  <text x="553" y="240" text-anchor="middle" class="t">vault</text>
+  <text x="553" y="255" text-anchor="middle" class="s">releases</text>
+</svg>

@@ -1,0 +1,203 @@
+/* ============================================================= *
+ *  Zul Whitepaper — print stylesheet (Paged.js / Chrome)        *
+ * ============================================================= */
+:root {
+  --ink:        #15161b;
+  --body:       #20222a;
+  --muted:      #565a63;
+  --faint:      #8a8f98;
+  --rule:       #e2e0da;
+  --rule-soft:  #eeece6;
+  --accent:     #5a2ee0;   /* iris violet — links, numerals, strokes */
+  --accent-ink: #3a1f93;   /* deep indigo — headings accents          */
+  --accent-deep:#1c1740;   /* near-black indigo — cover, dividers      */
+  --fill:       #f5f3fc;   /* faint violet — callouts, figure grounds  */
+  --fill-warm:  #faf8f3;
+  --paper:      #ffffff;
+  --mono: "Consolas","SF Mono",ui-monospace,"Liberation Mono",monospace;
+  --serif: "Palatino Linotype","Book Antiqua","Palatino",Georgia,serif;
+  --sans: "Segoe UI","Helvetica Neue","Inter",Arial,sans-serif;
+}
+
+/* ---------- page geometry ---------- */
+@page {
+  size: A4;
+  margin: 23mm 21mm 20mm 21mm;
+  @top-left   { content: "Zul · A Privacy Layer 2 for the SVM"; font: 7.5pt var(--sans); color:#9a9aa2; letter-spacing:.02em; }
+  @top-right  { content: string(sectitle);    font: 7.5pt var(--sans); color:#9a9aa2; letter-spacing:.02em; }
+  @bottom-center { content: counter(page);     font: 9pt var(--serif);  color:#6a6a72; }
+}
+@page :first { @top-left{content:none;} @top-right{content:none;} @bottom-center{content:none;} }
+@page cover  { margin:0; @top-left{content:none;} @top-right{content:none;} @bottom-center{content:none;} }
+
+/* ---------- base type ---------- */
+html { font-size: 10.5pt; }
+body {
+  font-family: var(--serif);
+  color: var(--body);
+  line-height: 1.52;
+  text-align: justify;
+  hyphens: auto;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+p { margin: 0 0 .62em; orphans: 2; widows: 2; }
+p.cont { text-indent: 0; }
+a { color: var(--accent); text-decoration: none; }
+strong { color: var(--ink); }
+em { color: inherit; }
+sup { font-size:.7em; line-height:0; }
+
+/* running-head capture */
+.doctitle-src { string-set: doctitle "Zul · A Privacy Layer 2 for the SVM"; }
+
+/* ---------- headings ---------- */
+h1, h2, h3, h4 { font-family: var(--sans); color: var(--ink); line-height: 1.18; font-weight: 700; }
+h1.section {
+  break-before: page;
+  page-break-before: always;
+  font-size: 21pt;
+  letter-spacing: -.012em;
+  margin: 0 0 .15em;
+  padding-top: 2mm;
+}
+h1.section .ttl { string-set: sectitle content(text); }
+h1.section .num {
+  display:block; font-size: 10pt; font-weight:700; letter-spacing:.16em;
+  color: var(--accent); margin-bottom: 1.4mm; text-transform: uppercase;
+}
+h1.section + .deck {
+  font-family: var(--serif); font-size: 11.5pt; color: var(--muted);
+  font-style: italic; margin: 0 0 5mm; text-align:left; max-width: 60%;
+  border-bottom: 1px solid var(--rule); padding-bottom: 4mm;
+}
+h2 { font-size: 13.5pt; margin: 1.5em 0 .35em; letter-spacing:-.006em; }
+h2 .num, h3 .num { color: var(--accent); font-weight:700; margin-right:.5em; }
+h3 { font-size: 11.5pt; margin: 1.25em 0 .25em; color: var(--accent-ink); }
+h4 { font-size: 10.5pt; margin: 1em 0 .2em; color: var(--ink); }
+h2, h3, h4 { break-after: avoid; }
+
+/* ---------- cover ---------- */
+.cover {
+  page: cover; break-after: page; position: relative;
+  width:210mm; height:297mm; overflow:hidden;
+  background: radial-gradient(120% 90% at 78% 8%, #2a1f6e 0%, #1c1740 42%, #120e2a 100%);
+  color:#ece9fb; box-sizing:border-box; padding: 30mm 24mm;
+  display:flex; flex-direction:column;
+}
+.cover .glyph { position:absolute; inset:0; opacity:.5; }
+.cover .kic { font: 8pt var(--sans); letter-spacing:.34em; text-transform:uppercase; color:#9d8cff; }
+.cover h1.title {
+  font-family: var(--sans); font-weight:800; font-size: 49pt; line-height:.98;
+  letter-spacing:-.02em; margin:.32em 0 .18em; color:#fff;
+}
+.cover .sub { font-family: var(--serif); font-size: 15pt; line-height:1.4; color:#c9c2f3; max-width: 132mm; font-style:italic; }
+.cover .spacer { flex:1; }
+.cover .meta { display:flex; gap:14mm; font:9.5pt var(--sans); color:#b9b1e8; border-top:1px solid #4a3f86; padding-top:5mm; }
+.cover .meta b { color:#fff; font-weight:600; display:block; font-size:8pt; letter-spacing:.14em; text-transform:uppercase; color:#9d8cff; margin-bottom:1.2mm; }
+.cover .tag { margin-top:6mm; font:9pt var(--mono); color:#8f83c8; }
+
+/* ---------- abstract ---------- */
+.abstract { break-before: page; }
+.abstract h2.kw { font-family:var(--sans); font-size:9pt; letter-spacing:.18em; text-transform:uppercase; color:var(--accent); margin:0 0 3mm; }
+.abstract .lead { font-size: 11pt; line-height:1.58; }
+.abstract .lead:first-letter { }
+.kvbar { font: 8.5pt var(--mono); color:var(--muted); margin-top:5mm; padding-top:3mm; border-top:1px solid var(--rule); }
+.kvbar b { color:var(--accent-ink); }
+
+/* ---------- table of contents ---------- */
+.toc { break-before: page; }
+.toc h1 { font-family:var(--sans); font-size:18pt; margin:0 0 6mm; color:var(--ink); }
+.toc ol { list-style:none; margin:0; padding:0; }
+.toc li { break-inside: avoid; }
+.toc .l1 { font-family:var(--sans); font-weight:600; font-size:10.5pt; margin: 3.2mm 0 0; color:var(--ink); }
+.toc .l2 { font-size:10pt; margin:.8mm 0 0 8mm; color:var(--body); }
+.toc a { color:inherit; display:flex; align-items:baseline; }
+.toc a .t { white-space:nowrap; }
+.toc a .leader { flex:1; margin:0 1.5mm; border-bottom:1px dotted #c8c6c0; transform: translateY(-2px); }
+.toc a::after { content: target-counter(attr(href), page); font-variant-numeric: tabular-nums; color:var(--muted); }
+.toc .l1 .num { color:var(--accent); margin-right:2.5mm; }
+
+/* ---------- figures ---------- */
+figure { break-inside: avoid; margin: 5mm 0; text-align:center; }
+figure svg { max-width:100%; height:auto; }
+figure.wide { }
+figcaption {
+  font: 9pt var(--sans); color:var(--muted); margin-top: 2.5mm;
+  text-align:center; line-height:1.4;
+}
+figcaption b { color:var(--accent-ink); font-weight:600; }
+.fig-frame { border:1px solid var(--rule); border-radius:4px; background:var(--paper); padding:5mm 4mm; }
+
+/* ---------- callout / theorem boxes ---------- */
+.box { break-inside: avoid; border:1px solid var(--rule); border-left:3px solid var(--accent);
+       background:var(--fill); border-radius:3px; padding:3.4mm 4.2mm; margin:4mm 0; }
+.box .lab { font:8.5pt var(--sans); font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--accent-ink); }
+.thm { break-inside: avoid; margin:3.5mm 0; padding-left:4mm; border-left:2px solid var(--accent); }
+.thm .lab { font-family:var(--sans); font-weight:700; color:var(--ink); }
+.thm .nm { color:var(--accent-ink); font-style:normal; }
+.thm em.st { font-style:italic; color:var(--body); }
+.proof { margin:2mm 0 3mm; }
+.proof .lab { font-style:italic; color:var(--muted); }
+.proof::after { content:"∎"; float:right; color:var(--muted); }
+.defn { break-inside: avoid; margin:3mm 0; }
+
+/* ---------- code / mono ---------- */
+code { font-family:var(--mono); font-size:.86em; color:var(--accent-ink); background:var(--fill); padding:.5px 3px; border-radius:3px; }
+.addr { font-family:var(--mono); font-size:.8em; color:var(--body); word-break:break-all; }
+pre { font-family:var(--mono); font-size:8.4pt; line-height:1.45; color:#2b2d36; background:var(--fill-warm);
+      border:1px solid var(--rule); border-radius:4px; padding:3.2mm 3.6mm; overflow:hidden; white-space:pre-wrap;
+      break-inside: avoid; margin:3.5mm 0; }
+pre .c { color:var(--faint); }
+pre .k { color:var(--accent); }
+
+/* ---------- tables ---------- */
+table { width:100%; border-collapse:collapse; font-size:9.2pt; margin:4mm 0; break-inside:avoid; }
+table.long { break-inside:auto; }
+table.long tr { break-inside:avoid; }
+caption { caption-side:top; text-align:left; font:9pt var(--sans); color:var(--muted); margin-bottom:2mm; }
+caption b { color:var(--accent-ink); }
+th { font-family:var(--sans); font-weight:600; font-size:8.6pt; text-align:left; color:var(--ink);
+     border-bottom:1.4px solid var(--ink); padding:1.8mm 3mm 1.8mm 0; vertical-align:bottom; }
+td { padding:1.6mm 3mm 1.6mm 0; border-bottom:1px solid var(--rule-soft); vertical-align:top; color:var(--body); }
+td.mono, th.mono { font-family:var(--mono); font-size:8pt; }
+tr.tot td { border-top:1.2px solid var(--ink); font-weight:600; }
+
+/* ---------- lists ---------- */
+ul, ol { margin:.2em 0 .7em; padding-left: 5.2mm; }
+li { margin:.18em 0; }
+ul.tight li, ol.tight li { margin:.05em 0; }
+ul.dash { list-style:none; padding-left:4mm; }
+ul.dash li::before { content:"—"; color:var(--accent); margin-left:-4mm; margin-right:1.8mm; }
+
+/* ---------- quote ---------- */
+blockquote { margin: 4mm 0 4mm 4mm; padding-left:4mm; border-left:2px solid var(--accent);
+             font-style:italic; color:var(--muted); }
+blockquote cite { display:block; font-style:normal; font-size:9pt; margin-top:1.5mm; color:var(--faint); }
+
+/* ---------- equation tag ---------- */
+.katex-display { margin:.7em 0; }
+.eq { position:relative; }
+.eq .tag { position:absolute; right:0; top:50%; transform:translateY(-50%); color:var(--muted); font-size:9.5pt; }
+
+/* ---------- references ---------- */
+.refs { text-align:left; }
+.refs ol { list-style:none; counter-reset:ref; padding:0; font-size:9.3pt; line-height:1.42; }
+.refs li { counter-increment:ref; position:relative; padding-left:9mm; margin:1.7mm 0; break-inside:avoid; text-align:left; hyphens:none; }
+.refs li::before { content:"["counter(ref)"]"; position:absolute; left:0; color:var(--accent); font-family:var(--sans); font-size:8.6pt; }
+.refs .au { }
+.refs .ti { font-style:italic; }
+.refs .ve { color:var(--muted); }
+
+/* cross-reference cite marks */
+a.cite { color:var(--accent); font-size:.86em; vertical-align:baseline; }
+
+/* ---------- appendix ---------- */
+.appendix h1.section .num { color:var(--accent-ink); }
+
+/* misc helpers */
+.small { font-size:9pt; color:var(--muted); }
+.center { text-align:center; }
+.nobreak { break-inside:avoid; }
+hr.soft { border:none; border-top:1px solid var(--rule); margin:5mm 0; }
+.lead-drop::first-letter { font-size:300%; line-height:.8; float:left; padding:1mm 2mm 0 0; color:var(--accent-ink); font-family:var(--sans); font-weight:700; }

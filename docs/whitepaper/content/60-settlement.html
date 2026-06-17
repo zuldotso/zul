@@ -1,0 +1,38 @@
+<h1 class="section" id="settlement"><span class="num">06 — Settlement boundary</span><span class="ttl">Blocks, Data Availability &amp; Settlement</span></h1>
+<div class="deck">Making the L2's history public on Solana, and turning a shallow withdrawals root into the one thing the L1 must trust.</div>
+
+<p>Settlement is where the L2 becomes accountable to the L1. Two artifacts cross the boundary every batch: a commitment to the L2's state, and enough data for anyone to reconstruct that state and check it. A third artifact — a shallow withdrawals root — is what actually authorizes assets to leave the bridge. Figure&nbsp;3 shows the two flows.</p>
+
+<figure>
+  @@fig:settlement@@
+  <figcaption><b>Figure 3.</b> (A) The batcher compresses a range of L2 blocks, chunks the bytes into the data-availability log, and posts a settlement record binding the state root, withdrawals root, and a hash of the data. (B) A withdrawal burned on L2 enters the depth-32 withdrawals tree; once its root is posted, an inclusion proof lets anyone claim the asset from the L1 vault.</figcaption>
+</figure>
+
+<h2><span class="num">6.1</span> Block production</h2>
+<p>The sequencer seals a block every slot in which there is work, and otherwise on a roughly ten-second heartbeat so that time advances and recent blockhashes rotate even when the chain is idle. The slot number is the chain height. Only blocks carrying real data are batched to L1; empty heartbeat blocks stay local. The recent-blockhash queue keeps the last 150 blockhashes, matching Solana's window so that client-side transaction expiry behaves identically.</p>
+
+<h2><span class="num">6.2</span> Data availability</h2>
+<p>For a batch spanning slots <span class="math">\([n,m]\)</span>, the batcher serializes the block and transaction data, compresses it with zstd, and splits the result into roughly 800-byte chunks carried as instruction data to the data-availability log program — a noop-style program whose only purpose is to make bytes permanently retrievable from the Solana ledger. The batch's <em>data hash</em> is</p>
+$$ \mathsf{da\_hash} \;=\; \blake\!\big(D_{\mathsf{da}} \,\|\, \mathsf{zstd}(\text{batch})\big), \qquad D_{\mathsf{da}} = \texttt{PL2:da:batch:v1}, $$
+<p>and is bound into the settlement record so the posted state root and the published bytes are inseparable. The node also serves batches directly over RPC, so reconstruction does not depend on a single archival source. This is the cheapest way to make the L2's history public, and publicity is the whole basis of the optimistic guarantee: anyone can download the data, replay it, and recompute the root the sequencer claimed.</p>
+
+<h2><span class="num">6.3</span> Settlement records and withdrawal claims</h2>
+<p>Each batch is recorded on L1 as:</p>
+<div class="box"><span class="lab">Settlement record (L1)</span>
+<pre>Batch {
+  batch_no:         u64,    <span class="c">// must equal the program's batch_count — strictly sequential</span>
+  first_slot:       u64,
+  last_slot:        u64,
+  state_root:       [u8;32],   <span class="c">// blake3 SMT root over all L2 accounts (§5)</span>
+  withdrawals_root: [u8;32],   <span class="c">// depth-32 SMT root over authorized exits</span>
+  da_hash:          [u8;32],
+  chunk_count:      u32,
+  posted_at:        i64,
+}</pre></div>
+
+<p>Posting is strictly sequential — the program accepts batch <span class="math">\(k\)</span> only when its internal counter is exactly <span class="math">\(k\)</span> — so the settled history is a single, gapless chain of roots. A <strong>withdrawal claim</strong> is the security-critical operation: it releases real value on L1. To claim, a user presents the withdrawal's parameters and an inclusion proof against a posted <code>withdrawals_root</code>. The settlement program recomputes the depth-32 leaf and walks the proof with the same blake3 construction as §<a href="#state">5</a>; if it reaches the posted root, it releases the asset from the vault. The withdrawal leaf binds an <em>asset identifier</em>:</p>
+$$ \mathsf{leaf}_{\mathsf{wd}} = \blake\big(D_\lambda \,\|\, \mathsf{recipient} \,\|\, \mathsf{asset\_id} \,\|\, \mathsf{amount} \,\|\, \mathsf{nonce}\big), $$
+<p>with <span class="math">\(\mathsf{asset\_id}=\mathbf{0}^{32}\)</span> for native SOL/ZUL and the L1 mint address for an SPL token. Binding the asset into the leaf is what makes <code>claim_withdrawal</code> and <code>claim_withdrawal_spl</code> safe: a proof authorizes releasing exactly one asset in exactly one amount to exactly one recipient, and nothing else (§<a href="#bridge">7</a>). The depth-32 tree is the reason this verifies cheaply enough to fit Solana's per-transaction compute budget; the full depth-256 state root would not.</p>
+
+<h2><span class="num">6.4</span> The optimistic model, stated honestly</h2>
+<p>Zul's settlement is optimistic and currently Stage&nbsp;0. The challenge window is procedural: because every batch's data is public and every state root is recomputable from it, an invalid root is <em>detectable</em> by anyone who replays the data — but the settlement program does not yet reject invalid roots on its own. We state this plainly rather than implying a guarantee we do not yet enforce. What <em>is</em> already enforced on L1 is solvency at the bridge: no asset leaves a vault without a valid inclusion proof against a posted withdrawals root, regardless of anything the sequencer claims about state. Section&nbsp;<a href="#roadmap">13</a> describes the path from a procedural challenge window to enforced fraud or validity proofs.</p>

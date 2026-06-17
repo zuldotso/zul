@@ -1,0 +1,71 @@
+<h1 class="section" id="architecture"><span class="num">03 — System</span><span class="ttl">Architecture &amp; Trust Model</span></h1>
+<div class="deck">Three machines in one node: a transparent SVM, a settlement boundary to Solana, and an enshrined shielded pool — and an honest account of what each requires you to trust.</div>
+
+<p>Zul is a single Rust process — the <em>node</em> — that plays the role a whole validator network plays on an L1, plus the role of a rollup's prover/poster. It is useful to read it as three cooperating machines that share one account store and one block stream:</p>
+
+<ul class="dash">
+  <li>a <strong>transparent execution machine</strong> that runs ordinary SVM transactions and commits the resulting state (§<a href="#execution">4</a>, §<a href="#state">5</a>);</li>
+  <li>a <strong>settlement boundary</strong> that anchors state roots and data to Solana and moves assets across the L1↔L2 seam (§<a href="#settlement">6</a>, §<a href="#bridge">7</a>);</li>
+  <li>an <strong>enshrined shielded pool</strong> that processes private value transfer outside the SVM, with native proof verification (§<a href="#shielded">8</a>).</li>
+</ul>
+
+<p>The composition is the design. The shielded pool is not a smart contract bolted onto the chain; it is a builtin the node executes directly, so it pays no compute-unit tax for pairing-heavy verification and can keep its own commitment tree and nullifier set as first-class state. The bridge is not an afterthought; it is the seam that lets value cross between the transparent and shielded worlds, and getting that seam right — binding each withdrawal to exactly the asset it may release — is what keeps composition from becoming a vulnerability.</p>
+
+<h2><span class="num">3.1</span> Components</h2>
+
+<figure>
+  @@fig:architecture@@
+  <figcaption><b>Figure 1.</b> Zul system architecture. Clients speak the Solana JSON-RPC subset to the node; the node executes SVM transactions, commits state through the blake3 SMT, runs the enshrined shielded pool, and exchanges deposits, state roots, and data-availability batches with Solana L1.</figcaption>
+</figure>
+
+<p>Figure&nbsp;1 shows the pieces. The <strong>node</strong> contains: a JSON-RPC server (a subset of Solana's HTTP and WebSocket API, Appendix&nbsp;<a href="#appendix">C</a>); a mempool feeding the <strong>SVM executor</strong> built on <code>solana-svm</code>; a block producer that seals a block each slot when there is work or a heartbeat elapses; an account store on <code>redb</code> carrying the depth-256 state SMT; the shielded-pool builtin; a bridge watcher that turns L1 deposits into L2 credits; and a batcher that posts state roots and compressed data to L1. Around the node sit the <strong>clients</strong> — a TypeScript SDK and wallet, a Next.js explorer, and an indexer that mirrors the chain into Postgres — and beneath it the <strong>L1 programs</strong>: a settlement program holding the bridge vaults and verifying withdrawal claims, and a data-availability log.</p>
+
+<h2><span class="num">3.2</span> Transaction lifecycles</h2>
+<p>Four flows exercise the whole system; each is detailed in its own section.</p>
+<ul class="dash">
+  <li><strong>Public transfer.</strong> A client submits a normal Solana transaction; the executor runs it; the block producer seals a block; the touched accounts update the state SMT (§<a href="#execution">4</a>).</li>
+  <li><strong>Deposit (L1→L2).</strong> A user locks SOL or an SPL token in the L1 vault; the watcher observes the event and credits native ZUL or a deterministic wrapped token on L2 (§<a href="#bridge">7</a>).</li>
+  <li><strong>Shielded operation.</strong> A client builds a shield, private transfer, or unshield, generates a Groth16 proof in the browser, and submits it; the node verifies natively, updates the commitment tree, and records nullifiers (§<a href="#shielded">8</a>).</li>
+  <li><strong>Withdraw (L2→L1).</strong> A burn on L2 enters the shallow withdrawals tree; once its root is posted, anyone can present an inclusion proof to the settlement program to release the asset on L1 (§<a href="#settlement">6</a>).</li>
+</ul>
+
+<h2><span class="num">3.3</span> Trust model</h2>
+<p>We separate two kinds of guarantee. A property is <em>enforced</em> when violating it requires breaking a cryptographic assumption; it is <em>procedural</em> when violating it is detectable by anyone with the public data but is not yet automatically rejected. Zul today is a Stage-0 rollup: its privacy and value-conservation guarantees are enforced, while its execution-integrity guarantee is procedural.</p>
+
+<div class="box">
+  <span class="lab">What the sequencer can and cannot do</span>
+  <table style="margin-top:1.5mm; font-size:9pt">
+    <tr><td style="width:62%"><strong>Can</strong> reorder or censor pending transactions</td><td>liveness / fairness assumption</td></tr>
+    <tr><td><strong>Can</strong> halt block production</td><td>liveness assumption</td></tr>
+    <tr><td><strong>Can</strong> post a state root not produced by honest execution</td><td>procedural — publicly detectable, not yet rejected on-chain</td></tr>
+    <tr><td><strong>Cannot</strong> create value in the shielded pool or forge a spend</td><td>enforced by Groth16 soundness + value conservation</td></tr>
+    <tr><td><strong>Cannot</strong> double-spend a note</td><td>enforced by the nullifier set</td></tr>
+    <tr><td><strong>Cannot</strong> learn the contents of a shielded transfer</td><td>enforced by zero-knowledge</td></tr>
+    <tr><td><strong>Cannot</strong> release a bridged asset without a valid inclusion proof</td><td>enforced by the L1 settlement program</td></tr>
+  </table>
+</div>
+
+<p>This is the one place a privacy project must not equivocate. The sequencer is trusted for <em>ordering and execution integrity</em> and is <em>not</em> trusted for <em>privacy or solvency</em>. A dishonest sequencer can stall the chain or attempt an invalid state transition — and because all batch data is public (§<a href="#settlement">6</a>), such an attempt is detectable by reconstruction — but it cannot mint hidden value, cannot unmask a private transfer, and cannot drain the L1 vaults, because those barriers are cryptographic rather than behavioral. Section&nbsp;<a href="#security">10</a> makes these statements precise; Section&nbsp;<a href="#roadmap">13</a> describes how the procedural guarantees become enforced ones.</p>
+
+<h2><span class="num">3.4</span> Threat model</h2>
+<p>We assume a probabilistic polynomial-time adversary that may submit arbitrary transactions, observe all public chain data and network traffic, and act as an ordinary user of the bridge and pool. The adversary may also <em>be</em> the sequencer. We do not assume a trusted third party beyond the per-circuit common reference string produced by the trusted setup (§<a href="#security">10.5</a>), whose compromise we analyze explicitly. Table&nbsp;2 maps the principal threats to the mechanism that addresses each.</p>
+
+<figure class="nobreak">
+  <table class="long" style="font-size:8.8pt">
+    <caption><b>Table 2.</b> Threats and the mechanism that addresses each. &ldquo;E&rdquo; = enforced by cryptography; &ldquo;P&rdquo; = procedural / disclosed.</caption>
+    <thead><tr><th>Threat</th><th>Mechanism</th><th>§</th><th>Class</th></tr></thead>
+    <tbody>
+      <tr><td>Inflate value in the shielded pool</td><td>In-circuit value conservation + Groth16 soundness</td><td><a href="#circuits">9</a></td><td>E</td></tr>
+      <tr><td>Spend a note twice</td><td>Deterministic nullifier + persistent nullifier set</td><td><a href="#shielded">8.3</a></td><td>E</td></tr>
+      <tr><td>Spend a note you do not own</td><td>Ownership constraint (spending key → public key)</td><td><a href="#circuits">9</a></td><td>E</td></tr>
+      <tr><td>Forge an inclusion proof against an old root</td><td>64-root ring + Poseidon Merkle tree</td><td><a href="#shielded">8.4</a></td><td>E</td></tr>
+      <tr><td>Mint a wrapped asset without a deposit</td><td>Keyless mint authority; supply grows only via vault lock</td><td><a href="#bridge">7.2</a></td><td>E</td></tr>
+      <tr><td>Release a bridged asset without burning on L2</td><td>L1 inclusion proof against posted withdrawals root</td><td><a href="#settlement">6.3</a></td><td>E</td></tr>
+      <tr><td>De-anonymize a private transfer</td><td>Zero-knowledge of Groth16; encrypted note discovery</td><td><a href="#security">10.4</a></td><td>E</td></tr>
+      <tr><td>Front-run a public unshield to a new recipient</td><td>Recipient bound into the proof</td><td><a href="#circuits">9.2</a></td><td>E</td></tr>
+      <tr><td>Post an invalid state root</td><td>Public DA + reconstruction (challenge not yet enforced)</td><td><a href="#settlement">6</a></td><td>P</td></tr>
+      <tr><td>Censor or reorder transactions</td><td>Single sequencer; decentralization on roadmap</td><td><a href="#roadmap">13</a></td><td>P</td></tr>
+      <tr><td>Link the public fee payer of a private transfer</td><td>v1 public fee payer; relayer planned</td><td><a href="#roadmap">13</a></td><td>P</td></tr>
+    </tbody>
+  </table>
+</figure>

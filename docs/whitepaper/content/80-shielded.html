@@ -1,0 +1,49 @@
+<h1 class="section" id="shielded"><span class="num">08 — Private machine</span><span class="ttl">The Shielded Pool: Cryptographic Core</span></h1>
+<div class="deck">Notes, commitments, nullifiers, and an incremental Merkle tree — the UTXO machinery that hides amounts and the transaction graph while keeping value provably conserved.</div>
+
+<p>The shielded pool is where Zul stops merely <em>not indexing</em> private data and starts making it cryptographically unavailable. It is a UTXO system in the Zerocash lineage <a class="cite" href="#references">[7]</a><a class="cite" href="#references">[8]</a>: value lives in <em>notes</em>, a note's existence is announced only as an opaque <em>commitment</em> in a Merkle tree, and spending a note reveals only a <em>nullifier</em> that prevents reuse without revealing which note was spent. Everything else — amounts, the asset, the link between a spend and the note it consumes — is hidden behind a zero-knowledge proof. The pool is enshrined in the node (§<a href="#execution">4.2</a>), so verifying those proofs costs no compute units and the pool keeps its commitment tree and nullifier set as native state.</p>
+
+<h2><span class="num">8.1</span> Field, hash, and notes</h2>
+<p>All shielded arithmetic is over <span class="math">\(\Fp\)</span>, the scalar field of the BN254 curve <a class="cite" href="#references">[13]</a> (a 254-bit prime). The only hash is Poseidon <a class="cite" href="#references">[14]</a>, written <span class="math">\(\H_k:\Fp^{k}\to\Fp\)</span> for arity <span class="math">\(k\)</span>; the implementation uses the circom-compatible parameters so the in-node Rust hasher and the in-circuit hasher agree exactly <a class="cite" href="#references">[22]</a>. A <strong>note</strong> is</p>
+$$ \nu \;=\; (\,\mathsf{asset\_id},\; v,\; \pk,\; \mathsf{blind}\,), \qquad v \in [0,\,2^{64}), $$
+<p>where <span class="math">\(\mathsf{asset\_id}\in\Fp\)</span> is <span class="math">\(0\)</span> for native ZUL or the L1 mint reduced into <span class="math">\(\Fp\)</span> for a bridged token, <span class="math">\(v\)</span> is the amount, <span class="math">\(\pk\)</span> the owner's public key, and <span class="math">\(\mathsf{blind}\)</span> a random blinding factor that makes commitments hiding.</p>
+
+<h2><span class="num">8.2</span> The two-level commitment</h2>
+<p>Keys and commitments are built from a single spending secret <span class="math">\(s\)</span> in two layers (Figure&nbsp;5):</p>
+$$ \pk = \H_1(s), \qquad \mathsf{secret} = \H_2(\pk,\,\mathsf{blind}), \qquad \cm = \H_3(\mathsf{asset\_id},\, v,\, \mathsf{secret}). $$
+
+<figure>
+  @@fig:note@@
+  <figcaption><b>Figure 5.</b> The note commitment and nullifier. The public key derives from the spending secret; a <em>secret</em> hides the owner and blinding; the commitment binds the public <span class="math">\((\mathsf{asset\_id},v)\)</span> to that secret; and the nullifier ties a commitment, its tree position, and the spending key together.</figcaption>
+</figure>
+
+<p>The two-level structure is not decoration; it is what makes a <em>deposit need no proof</em> while remaining sound. At shield time the depositor reveals the opaque <span class="math">\(\mathsf{secret}\)</span> (which still hides <span class="math">\(\pk\)</span> and <span class="math">\(\mathsf{blind}\)</span> by Poseidon's preimage resistance) together with the <em>public</em> <span class="math">\((\mathsf{asset\_id},v)\)</span>. The node recomputes <span class="math">\(\cm=\H_3(\mathsf{asset\_id},v,\mathsf{secret})\)</span> itself and checks it against the deposited funds. A flat commitment <span class="math">\(\H(\mathsf{asset\_id},v,\pk,\mathsf{blind})\)</span> could not be recomputed on-chain without revealing <span class="math">\(\pk\)</span> and <span class="math">\(\mathsf{blind}\)</span>, which would either break privacy or let a deposit of <span class="math">\(1\)</span> mint a note worth <span class="math">\(1000\)</span>. The two-level commitment dissolves that dilemma (Theorem&nbsp;<a href="#thm-shield">6</a>).</p>
+
+<h2><span class="num">8.3</span> Nullifiers</h2>
+<p>Spending a note at tree position <span class="math">\(i\)</span> reveals</p>
+$$ \nf \;=\; \H_3(\cm,\, i,\, s). $$
+<p>The nullifier is <em>deterministic</em> in the note and key, so the same note always yields the same nullifier and cannot be double-spent; yet without the spending key <span class="math">\(s\)</span> it is computationally unlinkable to the commitment <span class="math">\(\cm\)</span>, so observers cannot tell which note a spend consumed. Including the leaf index <span class="math">\(i\)</span> domain-separates otherwise-identical notes at different positions. The node keeps a persistent <strong>nullifier set</strong> — a store table mapping each spent nullifier to the slot at which it was spent — and rejects any transaction reusing one (Theorem&nbsp;<a href="#thm-ds">5</a>).</p>
+
+<h2><span class="num">8.4</span> The commitment tree</h2>
+<p>Commitments accumulate in an <em>incremental</em> Merkle tree of depth <span class="math">\(26\)</span> with Poseidon nodes <span class="math">\(\eta(L,R)=\H_2(L,R)\)</span>, giving capacity <span class="math">\(2^{26}\approx 6.7\times 10^{7}\)</span> notes. New commitments are appended at the next free leaf; empty positions use a fixed empty-leaf constant. To spend, a prover shows Merkle membership of the input note's commitment under <em>some</em> recent root. Because the root changes with every insertion, the pool retains a ring of the <strong>64 most recent roots</strong>; a proof is accepted against any root in the ring, which lets a wallet build a proof without racing the very next deposit. A spend against a root older than the ring is rejected, bounding how stale an accepted proof may be.</p>
+
+<h2><span class="num">8.5</span> The three operations</h2>
+<p>The pool exposes exactly three instructions; Figure&nbsp;6 traces a note's life through them, and §<a href="#circuits">9</a> (Figure&nbsp;7) details the circuits. Here is the pool's view of each.</p>
+<figure>
+  @@fig:lifecycle@@
+  <figcaption><b>Figure 6.</b> The note lifecycle. Value enters by <em>shield</em>, moves privately by <em>transfer</em>, and leaves by <em>unshield</em>; each spend reveals only a nullifier and a proof, while amounts, asset, and the sender↔receiver link stay hidden.</figcaption>
+</figure>
+<ul class="dash">
+  <li><strong>Shield.</strong> Public <span class="math">\((\mathsf{asset\_id}, v, \mathsf{secret})\)</span> plus an encrypted note. The node moves <span class="math">\(v\)</span> of the asset into the pool vault, recomputes <span class="math">\(\cm\)</span>, and appends it. No proof is required.</li>
+  <li><strong>Transfer.</strong> A 2-input/2-output join-split with a Groth16 proof. It reveals two nullifiers and two output commitments and a public fee, and hides the amounts, the asset, and which notes were consumed. Its public input vector has exactly six elements, <span class="math">\([\,\mathsf{root},\nf_0,\nf_1,\cm_0,\cm_1,\mathsf{fee}\,]\)</span>.</li>
+  <li><strong>Unshield.</strong> Spends one note to a public recipient and amount, with a private change note for the remainder, again with a six-element public input vector <span class="math">\([\,\mathsf{root},\nf,\cm_{\text{chg}},\mathsf{asset\_id},\mathsf{amount},\mathsf{recipient}\,]\)</span>. The node verifies the proof, releases <span class="math">\(\mathsf{amount}\)</span> of the asset from the vault to the recipient, records the nullifier, and appends the change commitment.</li>
+</ul>
+
+<h2><span class="num">8.6</span> Native verification</h2>
+<p>Transfer and unshield proofs are Groth16 over BN254, generated in the browser with snarkjs <a class="cite" href="#references">[21]</a> and verified in the node with arkworks (<code>ark-groth16</code>, <code>ark-bn254</code>) <a class="cite" href="#references">[23]</a>. Verification is a constant three-pairing check against a circuit-specific verifying key (§<a href="#circuits">9.3</a>); because it runs as a native builtin rather than metered BPF, the pairing cost is irrelevant to any compute-unit budget. The cross-language binding is tested directly: a snarkjs-generated proof is required to verify in the arkworks verifier, so the prover and verifier cannot silently diverge.</p>
+
+<h2><span class="num">8.7</span> Note discovery</h2>
+<p>A recipient must find notes paid to them without an index that would leak the graph. Each output note is encrypted to its recipient and attached to the transaction: the sender derives a shared secret by X25519 ECDH <a class="cite" href="#references">[29]</a> and seals the note's fields under XChaCha20-Poly1305 <a class="cite" href="#references">[30]</a>. A wallet trial-decrypts the ciphertexts of new transactions; the ones it can open are its incoming notes. Discovery therefore costs a scan but reveals nothing to anyone lacking the viewing key.</p>
+
+<h2><span class="num">8.8</span> Pool state and reserved addresses</h2>
+<p>The pool occupies reserved, keyless addresses so its accounts cannot be spoofed by a signed transaction: the pool program at <span class="addr">[05 21 00…00]</span>, its state account at <span class="addr">…01</span>, and its vault at <span class="addr">…02</span>. The state account holds the commitment tree's frontier, the 64-root ring, and the next free leaf index; the vault holds native ZUL lamports, and a per-mint associated-token account holds each wrapped asset that shield and unshield move in and out. Keeping this as native state — rather than inside a metered program account — is what lets the pool scale its tree and nullifier set without contorting around account-size and compute limits.</p>

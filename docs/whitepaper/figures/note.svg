@@ -1,0 +1,52 @@
+<svg viewBox="0 0 600 312" width="600" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="na" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L8 4.5 L0 9 z" fill="#5a2ee0"/></marker>
+    <style>
+      .in{fill:#ffffff;stroke:#94a3b8;stroke-width:1.1}
+      .out{fill:#efeafc;stroke:#5a2ee0;stroke-width:1.4}
+      .h{fill:#5a2ee0;stroke:none}
+      .il{font-size:11.5px;fill:#15161b;font-family:Consolas,monospace}
+      .hl{font-size:12px;fill:#ffffff;font-weight:700}
+      .ol{font-size:11px;fill:#3a1f93;font-family:Consolas,monospace;font-weight:600}
+      .an{font-size:10.5px;fill:#565a63;font-style:italic}
+      .e{stroke:#5a2ee0;stroke-width:1.3;fill:none}
+    </style>
+  </defs>
+
+  <!-- row 1: pk -->
+  <rect class="in" x="14" y="22" width="60" height="26" rx="5"/><text x="44" y="39" text-anchor="middle" class="il">s</text>
+  <line class="e" x1="74" y1="35" x2="120" y2="35" marker-end="url(#na)"/>
+  <ellipse class="h" cx="156" cy="35" rx="36" ry="17"/><text x="156" y="39" text-anchor="middle" class="hl">H₁</text>
+  <line class="e" x1="192" y1="35" x2="238" y2="35" marker-end="url(#na)"/>
+  <rect class="out" x="240" y="22" width="150" height="26" rx="5"/><text x="315" y="39" text-anchor="middle" class="ol">pk = H₁(s)</text>
+
+  <!-- row 2: secret -->
+  <rect class="in" x="14" y="86" width="60" height="26" rx="5"/><text x="44" y="103" text-anchor="middle" class="il">pk</text>
+  <rect class="in" x="14" y="118" width="86" height="26" rx="5"/><text x="57" y="135" text-anchor="middle" class="il">blinding</text>
+  <line class="e" x1="100" y1="112" x2="120" y2="112" marker-end="url(#na)"/>
+  <ellipse class="h" cx="156" cy="112" rx="36" ry="17"/><text x="156" y="116" text-anchor="middle" class="hl">H₂</text>
+  <line class="e" x1="192" y1="112" x2="238" y2="112" marker-end="url(#na)"/>
+  <rect class="out" x="240" y="99" width="220" height="26" rx="5"/><text x="350" y="116" text-anchor="middle" class="ol">secret = H₂(pk, blinding)</text>
+
+  <!-- row 3: commitment -->
+  <rect class="in" x="14" y="160" width="74" height="24" rx="5"/><text x="51" y="176" text-anchor="middle" class="il">asset_id</text>
+  <rect class="in" x="14" y="188" width="74" height="24" rx="5"/><text x="51" y="204" text-anchor="middle" class="il">amount</text>
+  <rect class="in" x="14" y="216" width="74" height="24" rx="5"/><text x="51" y="232" text-anchor="middle" class="il">secret</text>
+  <line class="e" x1="88" y1="200" x2="120" y2="200" marker-end="url(#na)"/>
+  <ellipse class="h" cx="156" cy="200" rx="36" ry="17"/><text x="156" y="204" text-anchor="middle" class="hl">H₃</text>
+  <line class="e" x1="192" y1="200" x2="238" y2="200" marker-end="url(#na)"/>
+  <rect class="out" x="240" y="187" width="250" height="26" rx="5"/><text x="365" y="204" text-anchor="middle" class="ol">cm = H₃(asset_id, amount, secret)</text>
+  <text x="500" y="204" class="an">→ commitment tree</text>
+
+  <!-- row 4: nullifier -->
+  <rect class="in" x="14" y="252" width="74" height="24" rx="5"/><text x="51" y="268" text-anchor="middle" class="il">cm</text>
+  <rect class="in" x="14" y="280" width="74" height="24" rx="5"/><text x="51" y="296" text-anchor="middle" class="il">leaf_index</text>
+  <rect class="in" x="96" y="266" width="40" height="24" rx="5"/><text x="116" y="282" text-anchor="middle" class="il">s</text>
+  <line class="e" x1="136" y1="278" x2="158" y2="278" marker-end="url(#na)"/>
+  <ellipse class="h" cx="194" cy="278" rx="36" ry="17"/><text x="194" y="282" text-anchor="middle" class="hl">H₃</text>
+  <line class="e" x1="230" y1="278" x2="266" y2="278" marker-end="url(#na)"/>
+  <rect class="out" x="268" y="265" width="200" height="26" rx="5"/><text x="368" y="282" text-anchor="middle" class="ol">nf = H₃(cm, leaf_index, s)</text>
+  <text x="478" y="282" class="an">→ revealed on spend</text>
+
+  <text x="14" y="14" class="an" fill="#3a1f93" font-style="normal" font-weight="700" font-size="11">All hashes are Poseidon over the BN254 scalar field 𝔽ₚ</text>
+</svg>

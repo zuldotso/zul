@@ -1,0 +1,94 @@
+<div class="appendix">
+<h1 class="section" id="appendix"><span class="num">Appendices</span><span class="ttl">Parameters &amp; Interfaces</span></h1>
+<div class="deck">The exact constants, domains, interfaces, and deployment identifiers referenced throughout.</div>
+
+<h2><span class="num">A</span> Protocol parameters</h2>
+<table class="long" style="font-size:9pt">
+  <thead><tr><th>Parameter</th><th>Value</th><th>§</th></tr></thead>
+  <tbody>
+    <tr><td>Pairing curve</td><td class="mono">BN254 (alt_bn128)</td><td><a href="#shielded">8.1</a></td></tr>
+    <tr><td>Proof system</td><td class="mono">Groth16 — proof = (A,B,C), 3 group elements</td><td><a href="#circuits">9.3</a></td></tr>
+    <tr><td>In-circuit hash</td><td class="mono">Poseidon (circom params), arities 1·2·3</td><td><a href="#shielded">8.1</a></td></tr>
+    <tr><td>State / settlement hash</td><td class="mono">blake3, 256-bit, domain-separated</td><td><a href="#state">5.1</a></td></tr>
+    <tr><td>State SMT depth</td><td class="mono">256</td><td><a href="#state">5.1</a></td></tr>
+    <tr><td>Withdrawals SMT depth</td><td class="mono">32</td><td><a href="#settlement">6.3</a></td></tr>
+    <tr><td>Commitment tree depth</td><td class="mono">26  (capacity 2²⁶ ≈ 6.7 × 10⁷ notes)</td><td><a href="#shielded">8.4</a></td></tr>
+    <tr><td>Root history ring</td><td class="mono">64 most-recent roots</td><td><a href="#shielded">8.4</a></td></tr>
+    <tr><td>Recent-blockhash queue</td><td class="mono">150</td><td><a href="#settlement">6.1</a></td></tr>
+    <tr><td>Amount range (in-circuit)</td><td class="mono">[0, 2⁶⁴)</td><td><a href="#circuits">9.1</a></td></tr>
+    <tr><td>Transfer public inputs</td><td class="mono">6 — [root, nf₀, nf₁, cm₀, cm₁, fee]</td><td><a href="#circuits">9.1</a></td></tr>
+    <tr><td>Unshield public inputs</td><td class="mono">6 — [root, nf, cm_chg, asset_id, amount, recipient]</td><td><a href="#circuits">9.2</a></td></tr>
+    <tr><td>DA chunk size / compression</td><td class="mono">≈ 800 bytes per chunk · zstd</td><td><a href="#settlement">6.2</a></td></tr>
+    <tr><td>Block cadence</td><td class="mono">slot = height · ~10 s idle heartbeat</td><td><a href="#settlement">6.1</a></td></tr>
+    <tr><td>Gas token</td><td class="mono">ZUL · 9 decimals · lamport unit of L2</td><td><a href="#execution">4.5</a></td></tr>
+  </tbody>
+</table>
+
+<h2><span class="num">B</span> Domain-separation tags</h2>
+<p class="small">Every hash is prefixed by a constant byte-string so that values from different roles can never collide. The tags retain a historical <code>PL2:</code> prefix that is consensus-pinned across the node, the L1 program, and the circuit test vectors; it is an internal identifier, not the protocol name.</p>
+<table class="long" style="font-size:8.8pt">
+  <thead><tr><th>Tag</th><th>Role</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">PL2:smt:key</td><td>account → leaf path</td></tr>
+    <tr><td class="mono">PL2:smt:leaf</td><td>state-tree leaf node</td></tr>
+    <tr><td class="mono">PL2:smt:node</td><td>state-tree internal node</td></tr>
+    <tr><td class="mono">PL2:smt:empty</td><td>empty-subtree base</td></tr>
+    <tr><td class="mono">PL2:account:v1</td><td>account hash</td></tr>
+    <tr><td class="mono">PL2:block:header:v1</td><td>block-header hash</td></tr>
+    <tr><td class="mono">PL2:da:batch:v1</td><td>data-availability batch hash</td></tr>
+    <tr><td class="mono">PL2:bridge:deposit-receipt:v1</td><td>exactly-once deposit receipt</td></tr>
+    <tr><td class="mono">PL2:bridge:withdraw:v1</td><td>withdrawal leaf</td></tr>
+    <tr><td class="mono">PL2:bridge:withdraw-addr:v1</td><td>withdrawal address derivation</td></tr>
+    <tr><td class="mono">PL2:bridge:wrapped-mint:v1</td><td>deterministic wrapped-mint address</td></tr>
+  </tbody>
+</table>
+
+<h2><span class="num">C</span> RPC surface</h2>
+<p class="small">The node answers a subset of the Solana JSON-RPC, so standard clients work unmodified, plus one Zul-specific method.</p>
+<table style="font-size:8.8pt">
+  <tbody>
+    <tr><td style="width:33%"><b>Reads</b></td><td><code>getHealth · getVersion · getSlot · getBlockHeight · getEpochInfo · getGenesisHash · getLatestBlockhash · isBlockhashValid · getMinimumBalanceForRentExemption · getFeeForMessage</code></td></tr>
+    <tr><td><b>Accounts</b></td><td><code>getBalance · getAccountInfo · getMultipleAccounts · getTokenAccountsByOwner · getProgramAccounts</code></td></tr>
+    <tr><td><b>History</b></td><td><code>getSignaturesForAddress · getSignatureStatuses · getTransaction · getBlock</code></td></tr>
+    <tr><td><b>Submit</b></td><td><code>sendTransaction · simulateTransaction · requestAirdrop</code> (faucet, non-mainnet)</td></tr>
+    <tr><td><b>Subscriptions</b></td><td><code>slotSubscribe · signatureSubscribe · accountSubscribe</code></td></tr>
+    <tr><td><b>Zul-specific</b></td><td><code>getWithdrawalProof(recipient, amount, nonce, asset?)</code> → state root + SMT inclusion proof</td></tr>
+  </tbody>
+</table>
+
+<h2><span class="num">D</span> Mainnet deployment</h2>
+<p class="small">Public, on-chain-verifiable identifiers of the live mainnet-beta deployment.</p>
+<table class="long" style="font-size:8.6pt">
+  <tbody>
+    <tr><td style="width:34%">Chain id</td><td class="mono">zul-mainnet-1</td></tr>
+    <tr><td>Genesis hash</td><td class="mono">FeVXkxhHChVk7HXKxfJuDSLMts45e5wkpF2nQ1c6XJ6D</td></tr>
+    <tr><td>Native pre-mine</td><td class="mono">zero — all native ZUL is bridge-backed</td></tr>
+    <tr><td>Settlement program</td><td class="mono">Po6oySWHr9oxFWVhZJ1Jca2HkvfzXxsK91n3R6mqZUL</td></tr>
+    <tr><td>Data-availability log</td><td class="mono">by9fpRVSYN9ib7qwXJuak37d78cKUMFgNAWtjK3pZUL</td></tr>
+    <tr><td>Gas mint (ZUL)</td><td class="mono">okTCeDRb7NeExmvf3RZxEs29i9nfw8Cd51oFVB4FZUL</td></tr>
+    <tr><td>Gas-mint properties</td><td class="mono">Token-2022 · 9 dec · mint authority revoked</td></tr>
+    <tr><td>Pool program / state / vault</td><td class="mono">[05 21 00…00] / …01 / …02  (keyless)</td></tr>
+  </tbody>
+</table>
+
+<h2><span class="num">E</span> Circuit public signals</h2>
+<p class="small">Public signals are declared as circuit inputs in a fixed order so the prover and the native verifier agree on the vector exactly.</p>
+<table style="font-size:9pt">
+  <thead><tr><th>Circuit</th><th>Public (in order)</th><th>Private</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><b>Transfer</b><br><span class="small">2-in / 2-out</span></td>
+      <td class="mono">root, nullifier[0], nullifier[1], out_commitment[0], out_commitment[1], fee</td>
+      <td class="mono">asset_id, in_amount[2], in_s[2], in_blinding[2], in_leaf_index[2], in_path[2][26], out_amount[2], out_pk[2], out_blinding[2]</td>
+    </tr>
+    <tr>
+      <td><b>Unshield</b><br><span class="small">1-in → public + change</span></td>
+      <td class="mono">root, nullifier, change_commitment, asset_id, amount, recipient</td>
+      <td class="mono">in_amount, in_s, in_blinding, in_leaf_index, in_path[26], change_amount, change_pk, change_blinding</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr class="soft"/>
+<p class="small center">Zul — A Privacy Layer 2 for the Solana Virtual Machine · Technical Whitepaper v1.0 · June 2026 · Live on Solana mainnet-beta</p>
+</div>

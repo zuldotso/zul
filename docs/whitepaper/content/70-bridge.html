@@ -1,0 +1,31 @@
+<h1 class="section" id="bridge"><span class="num">07 — The seam</span><span class="ttl">The Bridge</span></h1>
+<div class="deck">Moving SOL and arbitrary SPL tokens across the L1↔L2 boundary so that value — public or private — can cross without the boundary becoming a leak or a mint.</div>
+
+<p>A privacy L2 is only as useful as its connection to the assets people actually hold. Zul's bridge is bidirectional and asset-general: it moves SOL and any SPL token (classic or Token-2022) in both directions, and every bridged asset can subsequently be shielded (§<a href="#shielded">8</a>). The design discipline throughout is conservation: the L2 may credit a wrapped asset only when the original is genuinely locked on L1, and the L1 may release the original only against a proof that the wrapped asset was genuinely burned on L2.</p>
+
+<figure>
+  @@fig:bridge@@
+  <figcaption><b>Figure 4.</b> Bridge flows and asset mapping. Deposits lock value in an L1 vault and emit an event the watcher turns into an exactly-once L2 credit; withdrawals burn on L2 and release the bound asset from the vault against an inclusion proof. Native ZUL is fully backed by locked ZUL-SPL; other assets become deterministic wrapped tokens.</figcaption>
+</figure>
+
+<h2><span class="num">7.1</span> The asset model</h2>
+<p>On L2 there is exactly one native asset, ZUL, used for gas. Everything else is a <em>wrapped</em> token. Three rules cover every case:</p>
+<ul class="dash">
+  <li><strong>Gas.</strong> Depositing the designated gas mint — the ZUL-SPL token on L1 — credits native ZUL lamports one-for-one. With zero pre-mine at genesis, this is the <em>only</em> way native ZUL comes into existence, so the entire gas supply is backed by locked ZUL-SPL.</li>
+  <li><strong>SOL.</strong> Depositing native SOL credits a wrapped wSOL token at the canonical address <span class="addr">So111…112</span>, so SOL behaves on L2 as an ordinary SPL token.</li>
+  <li><strong>Any other SPL.</strong> Depositing an SPL mint credits a <em>deterministic</em> wrapped token whose mint address is <span class="math">\(\blake(D_{\mathsf{wm}} \,\|\, \mathsf{l1\_mint})\)</span>, with decimals copied from the original.</li>
+</ul>
+
+<h2><span class="num">7.2</span> Why wrapped supply cannot be forged</h2>
+<p>Each wrapped mint's authority is a <em>keyless reserved address</em> — a pubkey with no corresponding secret key, off the Ed25519 curve. No party can sign a <code>MintTo</code> for it, so a wrapped token's supply can grow only through the node's own deposit-crediting path, never through an SVM instruction. Combined with deterministic addressing, this means the wrapped representation of an L1 mint is unique and its supply tracks exactly the value locked in that mint's vault.</p>
+
+<p>The deposit path also screens the asset itself. The L1 program's <code>require_safe_mint</code> check rejects Token-2022 extensions that would make a locked balance unsafe or non-conservative — transfer hooks, permanent delegates, non-transferable or default-frozen states, and confidential-transfer configurations — while permitting benign ones. For a mint carrying a transfer fee, the bridge credits the amount the vault <em>actually received</em> after the fee, never the requested amount, so a fee-on-transfer token cannot be used to over-credit the L2.</p>
+
+<h2><span class="num">7.3</span> Deposit: exactly once</h2>
+<p>A deposit on L1 (<code>deposit_sol</code> or <code>deposit_spl</code>) locks value in the vault and emits a <code>Deposited</code> event carrying the depositor, amount, L2 recipient, and — for SPL — the mint and its decimals. The node's watcher polls for these events on a short interval and applies them as direct credits at the top of the next block. The danger with any deposit watcher is double-crediting; Zul forecloses it with a <em>deposit receipt</em>: a reserved account keyed by the L1 transaction signature is written the first time a deposit is credited, and the credit is skipped whenever that receipt already exists, whether earlier in the same block or in any committed block. Crediting is therefore idempotent in the L1 signature.</p>
+
+<h2><span class="num">7.4</span> Withdraw: bound to one asset</h2>
+<p>A withdrawal burns the wrapped (or native) asset on L2 and inserts a leaf into the depth-32 withdrawals tree (§<a href="#settlement">6.3</a>). Once the root is posted, anyone holding the witness can call <code>claim_withdrawal</code> (native) or <code>claim_withdrawal_spl</code> (token), which verifies the inclusion proof and releases the asset from the vault — native lamports from the vault PDA, or tokens from the per-mint vault associated-token account it controls. Because the asset identifier is hashed into the withdrawal leaf, a valid proof can only ever release the specific asset the L2 burned: the claim cannot be redirected to a different, more valuable token in the vault.</p>
+
+<h2><span class="num">7.5</span> Crossing into the shielded world</h2>
+<p>The bridge and the pool compose. A bridged asset is identified on L2 by its mint; inside the shielded pool that same identity becomes a field element — <span class="math">\(\mathsf{asset\_id}=0\)</span> for native ZUL, or the mint's bytes reduced modulo the field prime for any wrapped token (§<a href="#shielded">8.1</a>). So the full lifecycle — deposit an SPL token, shield it, transfer it privately, unshield it, withdraw it back to L1 — is available for any asset the bridge supports, with the asset's identity carried coherently across every stage and revealed only where a public vault movement reveals it anyway.</p>

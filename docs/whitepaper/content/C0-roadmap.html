@@ -1,0 +1,37 @@
+<h1 class="section" id="roadmap"><span class="num">13 — Toward less trust</span><span class="ttl">Trust-Minimization Roadmap</span></h1>
+<div class="deck">Every procedural guarantee in this paper is a place we intend to need less trust, not more. Here is how each becomes enforced.</div>
+
+<p>Section&nbsp;<a href="#security">10.6</a> named what is not yet enforced. This section turns that list into a direction. The ordering principle is the same one that governs the north star: ship the reachable improvement, and build it in the shape of the eventual one so the work compounds.</p>
+
+<h2><span class="num">13.1</span> Decentralizing the sequencer</h2>
+<p>A single sequencer can censor, reorder, or stall. The path is a sequencer set with rotation, and — independent of who sequences — a <em>forced-inclusion</em> path on L1 so that a censored user can compel their transaction's inclusion through the settlement contract. Forced inclusion is the property that matters most for users; it can precede full sequencer decentralization.</p>
+
+<h2><span class="num">13.2</span> From procedural to enforced settlement</h2>
+<p>Today an invalid state root is detectable from public data but not rejected on-chain. The near step is an enforced fraud proof: a challenger re-executes a disputed batch from the data-availability stream and submits a succinct disagreement the settlement program can adjudicate. The far step is validity — a proof of correct execution posted with each batch. Rung&nbsp;B of §<a href="#northstar">12</a> is exactly this endgame: an SBF zkVM that can prove execution is simultaneously the tool that makes settlement trustless and the tool that makes execution private. Settlement and privacy converge on the same artifact.</p>
+
+<h2><span class="num">13.3</span> Private fees</h2>
+<p>The v1 public fee payer links an otherwise-unlinkable transfer to an identity (§<a href="#security">10.4</a>). The fix is a relayer that submits shielded transactions on the user's behalf, paid by an <em>in-circuit fee output</em> so the fee is part of what the proof conserves rather than a separate public payment. The transfer circuit already carries a public fee signal; the relayer is the missing client-and-incentive layer around it.</p>
+
+<h2><span class="num">13.4</span> A multi-party ceremony</h2>
+<p>The mainnet phase-2 setup was a single honest contribution (§<a href="#security">10.5</a>). For higher value, the same tooling runs a multi-party ceremony: as long as one contributor is honest and discards their entropy, the CRS is sound. This strengthens assumption (A1) with no protocol change — only a re-run and a redeploy of the verifying keys.</p>
+
+<h2><span class="num">13.5</span> Key custody and the encrypted mempool</h2>
+<p>Upgrade authority over the L1 programs should move from a hot key to a multisig with minimized powers, so no single key can alter settlement or bridge logic. Separately, an encrypted mempool would deny even the sequencer a view of transaction contents before ordering, closing the residual ordering-based metadata channel.</p>
+
+<figure class="nobreak">
+  <table class="long" style="font-size:9pt">
+    <caption><b>Table 4.</b> Trust-minimization targets. Each row moves a property from procedural (P) toward enforced (E).</caption>
+    <thead><tr><th>Property</th><th>Today</th><th>Target</th><th>Mechanism</th></tr></thead>
+    <tbody>
+      <tr><td>Censorship resistance</td><td>P</td><td>E</td><td>Forced inclusion on L1</td></tr>
+      <tr><td>Execution integrity</td><td>P</td><td>E</td><td>Fraud proofs → validity proofs (rung B)</td></tr>
+      <tr><td>Sequencing</td><td>single</td><td>set</td><td>Rotating sequencer set</td></tr>
+      <tr><td>Fee-payer privacy</td><td>P</td><td>E</td><td>Relayer + in-circuit fee output</td></tr>
+      <tr><td>Trusted setup</td><td>1-of-1</td><td>n-of-1</td><td>Multi-party phase-2 ceremony</td></tr>
+      <tr><td>Upgrade custody</td><td>hot key</td><td>multisig</td><td>Threshold authority, minimized powers</td></tr>
+      <tr><td>Ordering metadata</td><td>visible</td><td>hidden</td><td>Encrypted mempool</td></tr>
+    </tbody>
+  </table>
+</figure>
+
+<p>None of these are speculative primitives; each is a known technique with a clear integration point in the system this paper describes. The work is to enforce, one property at a time, what is today disclosed — and to do it without ever quietly claiming a guarantee before it holds.</p>
