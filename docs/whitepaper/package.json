@@ -1,0 +1,11 @@
+{
+  "name": "zul-whitepaper",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "dependencies": {
+    "katex": "^0.16.11",
+    "pagedjs": "^0.4.3",
+    "puppeteer-core": "^23.10.4"
+  }
+}
