@@ -10,7 +10,7 @@
   <a href="https://x.com/zuldotso"><b>@zuldotso</b></a>
 </p>
 
-<p><sub><b>CA</b></sub>&nbsp; <code>SOON</code></p>
+<p><sub><b>CA</b></sub>&nbsp; <code>79aujaj6eQ2fpgvhkTtj8ytQiyt9PM5rWN3qkrNpump</code></p>
 
 </div>
 
